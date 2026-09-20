@@ -5,4 +5,7 @@ __pycache__/
 .DS_Store
 
 data/
+!/data/
+/data/*
+!/data/DATASETS.md
 runs/

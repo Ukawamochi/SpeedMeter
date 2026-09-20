@@ -1,51 +1,53 @@
 # speakmeter
 
-日本語の音声から話速（毎秒モーラ数）をリアルタイムに推定する小型CNNを開発するプロジェクト。
-書き起こしは行わず、一定区間に含まれるモーラ数のみを推定する。最終的にONNXへ書き出し、ブラウザ上で動作させることを目指す。
+日本語音声から話速（毎秒モーラ数）を推定する小型CNNを開発するプロジェクト。
+一定区間に含まれるモーラ数を推定し、最終的にONNXへ書き出してブラウザ上で動作させることを目指す。
 
-## 環境の再現手順
+## 現在の実装
 
-Python 3.12を前提とし、[uv](https://docs.astral.sh/uv/)でパッケージ管理を行う。
+- テキストのカタカナ読み変換とモーラ数カウント: `src/spkrate/labels/mora.py`
+- モーラ処理の単体テスト: `tests/test_mora.py`
+- 環境確認: `scripts/check_env.py`
+- テキストファイルの読み・モーラ数の確認: `scripts/inspect_mora.py`
+
+データ読み込み、特徴量計算、モデル、学習、評価、ONNX書き出しは今後の実装対象。
+モーラ処理の追加修正に関する回答と未解決点は [docs/questions.md](docs/questions.md) に記録している。
+
+## 開発環境
+
+Pythonのバージョンは `.python-version`、依存関係は `pyproject.toml` と `uv.lock` で管理する。
 
 ```bash
 uv sync
 uv run python scripts/check_env.py
+uv run python -m pytest -q
 ```
 
-`scripts/check_env.py`は以下を出力する。
+`check_env.py` はPython・PyTorchのバージョン、MPSの利用可否と演算、pyopenjtalkの読み変換を確認する。
 
-- Pythonのバージョン
-- torchのバージョン
-- `torch.backends.mps.is_available()`の結果
-- MPS上でのConv2d順伝播の成否
-- pyopenjtalkによる読み変換の動作確認（入力「今日は快晴です」）
+1行1文のテキストについて読みとモーラ数を確認するには、次を実行する。
 
-## ディレクトリ構成
-
-```
-pyproject.toml       依存関係とプロジェクト設定
-docs/                 仕様・計画・進捗・疑問点の文書
-configs/              モデル・特徴量・分割などの設定ファイル
-configs/splits/       話者単位の学習・検証・テスト分割の固定ファイル
-src/spkrate/labels/   テキストからのモーラ数ラベル生成
-src/spkrate/data/     データセットの読み込み・分割処理
-src/spkrate/features/ 特徴量（対数メルスペクトログラム）の計算・保存
-src/spkrate/models/   モデル定義
-src/spkrate/train/    学習スクリプト
-src/spkrate/eval/     評価指標・評価スクリプト
-src/spkrate/baselines/ 信号処理・書き起こしベースライン
-src/spkrate/export/   ONNX書き出し・量子化
-scripts/              環境確認などの補助スクリプト
-tests/                単体テスト
-data/                 コーパス・音声データ（git管理外）
-runs/                 学習ログ（git管理外）
-results/              評価指標の記録（results/metrics.csvはgit管理下）
+```bash
+uv run python scripts/inspect_mora.py path/to/text.txt
 ```
 
-## ドキュメントの役割
+## データセット
 
-- `docs/spec.md`: 仕様の正。入力・出力・特徴量・モデル構造・評価指標などを固定する
-- `docs/plan.md`: 開発段階ごとの担当・成果物・完了条件
-- `docs/progress.md`: セッションごとの実施内容・数値・未解決点の記録
-- `docs/questions.md`: 仕様への疑問、環境の問題、人間の判断が必要な事項の記録
-- `CLAUDE.md`: このリポジトリで作業する際の規則
+データセットは手動で取得し、`data/` 以下に配置する。
+配置先と確認済みの取得記録は [data/DATASETS.md](data/DATASETS.md) を参照する。
+利用前に必要なファイルがそろっているか確認する。
+データ本体・アーカイブはGit管理外とし、配置案内の `data/DATASETS.md` のみ管理する。
+
+## ディレクトリと文書
+
+- `src/spkrate/`: 実装。`labels/` 以外の機能別ディレクトリは実装用のひな形
+- `scripts/`: 環境確認・モーラ処理確認用の補助スクリプト
+- `tests/`: 単体テスト
+- `configs/`: 今後作成する設定と話者単位の分割。`configs/splits/` の分割ファイルは未作成
+- `runs/`: 学習ログの出力先（Git管理外）
+- `results/`: 評価結果の出力先
+- [docs/spec.md](docs/spec.md): 入出力・モーラ・特徴量・モデル・評価の仕様
+- [docs/plan.md](docs/plan.md): 今後の段階を含む開発計画
+- [docs/progress.md](docs/progress.md): セッションごとの実施記録
+- [docs/questions.md](docs/questions.md): 仕様の確認事項と回答
+- [CLAUDE.md](CLAUDE.md): リポジトリで作業する際の規則
