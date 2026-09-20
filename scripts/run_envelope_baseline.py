@@ -252,6 +252,86 @@ def constant_baseline_mae(cache: EnvelopeCache) -> tuple[float, float]:
     return value, float(np.mean(np.abs(cache.true_rates - value)))
 
 
+def stages_for(method: str) -> list[tuple[str, list[dict[str, object]]]]:
+    """数え方ごとの探索段階。その数え方に効かないパラメータは候補に入れない。
+
+    突出量（``peak_prominence``）はピークを数える場合にしか使われないため、
+    ゼロ交差の枝では動かさない（同じ MAE の候補が並ぶだけで意味がないため）。
+
+    帯域の候補は docs/PLAN.md 3-2 の「2Hzから10Hzの帯域で変動成分を取り出す」の
+    内側に限る。これより広い帯域も試したが（``REFERENCE_BANDS``）、採用しない。
+    閾値の類は範囲の端に最小点が貼り付かないよう、両側に余裕を持たせてある。
+    """
+    stages: list[tuple[str, list[dict[str, object]]]] = [
+        (
+            "帯域",
+            [
+                {"band_low_hz": low, "band_high_hz": high}
+                for low in (2.0, 2.5, 3.0)
+                for high in (8.0, 9.0, 10.0)
+            ],
+        ),
+    ]
+    if method == "peak":
+        stages.append(
+            (
+                "突出量と平滑化",
+                [
+                    {"peak_prominence": prominence, "smoothing_sec": smoothing}
+                    for prominence in (0.05, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+                    for smoothing in (0.0, 0.02, 0.03, 0.05)
+                ],
+            )
+        )
+    else:
+        stages.append(
+            ("平滑化", [{"smoothing_sec": smoothing} for smoothing in (0.0, 0.02, 0.03, 0.05)])
+        )
+    stages.extend(
+        [
+            (
+                "無音の閾値",
+                [
+                    {"silence_floor_db": value}
+                    for value in (-50.0, -45.0, -40.0, -35.0, -30.0, -25.0, -20.0, -15.0, -10.0, -5.0)
+                ],
+            ),
+            (
+                "最小間隔",
+                [
+                    {"min_peak_distance_sec": value}
+                    for value in (0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.12)
+                ],
+            ),
+        ]
+    )
+    return stages
+
+
+# 参考として試す、docs/PLAN.md 3-2 の指定（2Hz〜10Hz）より広い帯域。採用はしない。
+REFERENCE_BANDS: tuple[tuple[float, float], ...] = (
+    (2.0, 12.0),
+    (2.0, 14.0),
+    (2.0, 16.0),
+    (1.5, 10.0),
+    (1.25, 12.0),
+    (1.0, 16.0),
+)
+
+# 座標降下法を何巡させるか。1巡目で選んだ値が後の段階に依存する場合があるため、
+# 2巡目で変化が無くなることを確かめる。
+NUM_PASSES = 2
+
+
+@dataclass
+class Branch:
+    """ある数え方について探索した結果。"""
+
+    method: str
+    final: Trial
+    stages: list[tuple[str, list[Trial]]]
+
+
 def tune(args: argparse.Namespace) -> None:
     segments = load_dev_segments()
     log(f"dev の全クリップ数: {len(segments)}")
@@ -269,55 +349,41 @@ def tune(args: argparse.Namespace) -> None:
     constant_value, constant_mae = constant_baseline_mae(cache)
     log(f"常に中央値({constant_value:.3f})と答える場合の MAE = {constant_mae:.4f}")
 
-    stages: list[tuple[str, list[dict[str, object]]]] = [
-        (
-            "第1段階: 帯域と数え方",
-            [
-                {"band_low_hz": low, "band_high_hz": high, "count_method": method}
-                for method in ("peak", "zero_cross")
-                for low in (1.5, 2.0, 2.5, 3.0)
-                for high in (8.0, 10.0, 12.0)
-            ],
-        ),
-        (
-            "第2段階: 突出量と平滑化",
-            [
-                {"peak_prominence": prominence, "smoothing_sec": smoothing}
-                for prominence in (0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
-                for smoothing in (0.0, 0.02, 0.03, 0.05)
-            ],
-        ),
-        (
-            "第3段階: 無音の閾値",
-            [{"silence_floor_db": value} for value in (-50.0, -45.0, -40.0, -35.0, -30.0, -25.0)],
-        ),
-        (
-            "第4段階: 帯域の微調整",
-            [
-                {"band_low_hz": low, "band_high_hz": high}
-                for low in (1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0)
-                for high in (7.0, 8.0, 9.0, 10.0, 11.0, 12.0)
-            ],
-        ),
-        (
-            "第5段階: 最小間隔",
-            [{"min_peak_distance_sec": value} for value in (0.04, 0.06, 0.08, 0.10, 0.12)],
-        ),
-    ]
+    # 「ピークを数える」と「ゼロ交差を数える」を別々に最後まで調整してから比べる。
+    # 既定値のまま一度に比べると、片方に不利な初期値で優劣が決まってしまうため。
+    branches: list[Branch] = []
+    for method in ("peak", "zero_cross"):
+        log(f"=== 数え方 {method} の探索 ===")
+        params = BASE_PARAMS.replace(count_method=method)
+        stage_trials: list[tuple[str, list[Trial]]] = []
+        for pass_index in range(1, NUM_PASSES + 1):
+            for name, candidates in stages_for(method):
+                label = f"{method} / {pass_index}巡目 / {name}"
+                log(label)
+                params, trials = search_stage(cache, params, label, candidates)
+                stage_trials.append((label, trials))
+        final = run_trial(cache, params, f"{method} の最終")
+        log(f"=== 数え方 {method} の最終: MAE={final.mae:.4f}, k={final.factor} ===")
+        branches.append(Branch(method=method, final=final, stages=stage_trials))
 
-    params = BASE_PARAMS
-    all_trials: list[tuple[str, list[Trial]]] = []
-    for name, candidates in stages:
-        log(name)
-        params, trials = search_stage(cache, params, name, candidates)
-        all_trials.append((name, trials))
+    best = min(branches, key=lambda branch: branch.final.mae)
+    log(f"採用した数え方: {best.method}")
+    log(f"選んだパラメータ: {best.final.params.as_dict()}")
+    log(f"部分集合での MAE = {best.final.mae:.4f}, k = {best.final.factor}")
 
-    final = run_trial(cache, params, "最終")
-    log(f"選んだパラメータ: {final.params.as_dict()}")
-    log(f"部分集合での MAE = {final.mae:.4f}, k = {final.factor}")
+    # 指定より広い帯域も測っておく（採用はしない。差が小さいことを記録に残すため）。
+    reference: list[Trial] = []
+    for low, high in REFERENCE_BANDS:
+        trial = run_trial(
+            cache,
+            best.final.params.replace(band_low_hz=low, band_high_hz=high),
+            f"band_low_hz={low}, band_high_hz={high}",
+        )
+        reference.append(trial)
+        log(f"参考（不採用）: {trial.label} -> MAE={trial.mae:.4f}, k={trial.factor}")
 
-    write_config(final.params, args)
-    write_tuning_report(final, all_trials, cache, constant_value, constant_mae, args)
+    write_config(best.final.params, args)
+    write_tuning_report(best, branches, cache, constant_value, constant_mae, args, reference)
 
 
 def write_config(params: EnvelopeParams, args: argparse.Namespace) -> None:
@@ -340,13 +406,15 @@ def write_config(params: EnvelopeParams, args: argparse.Namespace) -> None:
 
 
 def write_tuning_report(
-    final: Trial,
-    all_trials: list[tuple[str, list[Trial]]],
+    best: Branch,
+    branches: list[Branch],
     cache: EnvelopeCache,
     constant_value: float,
     constant_mae: float,
     args: argparse.Namespace,
+    reference: list[Trial],
 ) -> None:
+    final = best.final
     lines: list[str] = []
     lines.append("# 信号処理ベースラインの調整（docs/PLAN.md 第3段階 3-2）")
     lines.append("")
@@ -354,7 +422,9 @@ def write_tuning_report(
     lines.append("")
     lines.append("- 実装: `src/spkrate/baselines/envelope.py`")
     lines.append("- 実行: `scripts/run_envelope_baseline.py tune`")
-    lines.append(f"- 対象: 検証セット（dev）から固定シード `{args.seed}` で無作為抽出した **{len(cache.segment_ids)}件**")
+    lines.append(
+        f"- 対象: 検証セット（dev）から固定シード `{args.seed}` で無作為抽出した **{len(cache.segment_ids)}件**"
+    )
     lines.append("- テストセット（`configs/splits/test.json`）は一切使っていない")
     lines.append("- 指標は毎秒モーラ数の平均絶対誤差（MAE）。小さいほど良い")
     lines.append(
@@ -371,22 +441,41 @@ def write_tuning_report(
     )
     lines.append("")
     lines.append(
+        "「ピークを数える」と「正方向のゼロ交差を数える」は、どちらも最後まで別々に"
+        "調整してから比べた。既定値のまま一度に比べると、片方に不利な初期値のまま"
+        "優劣が決まってしまうためである。"
+    )
+    lines.append("")
+    lines.append(
         "換算係数 `mora_per_syllable` は各候補ごとに、その候補の音節数に対して"
         "平均絶対誤差を最小にする値を厳密に求めている（誤差は換算係数について"
         "区分線形かつ凸なので、重み付き中央値が最小点になる）。したがって下表の MAE は"
         "いずれも「その設定で最良の換算係数を使ったときの値」である。"
     )
     lines.append("")
-    for name, trials in all_trials:
-        best = min(trials, key=lambda trial: trial.mae)
-        lines.append(f"### {name}")
-        lines.append("")
-        lines.append("| 候補 | 換算係数 | MAE |")
-        lines.append("| --- | --- | --- |")
-        for trial in sorted(trials, key=lambda trial: trial.mae):
-            mark = " ←採用" if trial.label == best.label else ""
-            lines.append(f"| {trial.label}{mark} | {trial.factor} | {trial.mae:.4f} |")
-        lines.append("")
+    lines.append("## 数え方ごとの最終結果")
+    lines.append("")
+    lines.append("| 数え方 | 換算係数 | 部分集合での MAE |")
+    lines.append("| --- | --- | --- |")
+    for branch in sorted(branches, key=lambda branch: branch.final.mae):
+        mark = " ←採用" if branch.method == best.method else ""
+        lines.append(
+            f"| {branch.method}{mark} | {branch.final.factor} | {branch.final.mae:.4f} |"
+        )
+    lines.append("")
+    lines.append("## 探索した範囲と各候補の平均絶対誤差")
+    lines.append("")
+    for branch in branches:
+        for name, trials in branch.stages:
+            stage_best = min(trials, key=lambda trial: trial.mae)
+            lines.append(f"### {name}")
+            lines.append("")
+            lines.append("| 候補 | 換算係数 | MAE |")
+            lines.append("| --- | --- | --- |")
+            for trial in sorted(trials, key=lambda trial: trial.mae):
+                mark = " ←採用" if trial.label == stage_best.label else ""
+                lines.append(f"| {trial.label}{mark} | {trial.factor} | {trial.mae:.4f} |")
+            lines.append("")
     lines.append("## 選んだ値")
     lines.append("")
     lines.append("| パラメータ | 値 |")
@@ -394,9 +483,26 @@ def write_tuning_report(
     for key, value in final.params.as_dict().items():
         lines.append(f"| `{key}` | {value} |")
     lines.append("")
-    lines.append(f"- 部分集合での MAE = **{final.mae:.4f}**（常に中央値と答える場合は {constant_mae:.4f}）")
+    lines.append(
+        f"- 部分集合での MAE = **{final.mae:.4f}**（常に中央値と答える場合は {constant_mae:.4f}）"
+    )
     lines.append(f"- 音節が1つも検出されなかったクリップの割合 = {final.zero_count_ratio * 100:.2f}%")
     lines.append("- 設定ファイル: `configs/baselines/envelope.yaml`")
+    lines.append("")
+    lines.append("## 参考: 指定より広い帯域（不採用）")
+    lines.append("")
+    lines.append(
+        "帯域の候補は docs/PLAN.md 3-2 の「2Hzから10Hz」の内側に限って選んだ。"
+        "その外側も測っておいたが、改善はわずかで、手法の定義を指定から外してまで"
+        "得る価値は無いと判断して採用しなかった。"
+    )
+    lines.append("")
+    lines.append("| 帯域 | 換算係数 | MAE | 採用値との差 |")
+    lines.append("| --- | --- | --- | --- |")
+    for trial in sorted(reference, key=lambda trial: trial.mae):
+        lines.append(
+            f"| {trial.label} | {trial.factor} | {trial.mae:.4f} | {trial.mae - final.mae:+.4f} |"
+        )
     lines.append("")
     lines.append("## 最終評価の条件")
     lines.append("")
