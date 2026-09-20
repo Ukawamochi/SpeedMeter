@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from spkrate.labels.mora import count_mora, read_kana
+from spkrate.labels.mora import count_mora_from_kana, to_kana
 
 
 def main() -> None:
@@ -23,8 +23,8 @@ def main() -> None:
             text = line.rstrip("\n")
             if text == "":
                 continue
-            kana = read_kana(text)
-            mora = count_mora(kana)
+            kana = to_kana(text)
+            mora = count_mora_from_kana(kana)
             print(f"{text}\t{kana}\t{mora}")
 
 
