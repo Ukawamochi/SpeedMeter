@@ -51,3 +51,10 @@
 - 除外は学習データ構築経路からのみ呼ぶ規約をモジュール・関数docstringとspec.mdに明記し、評価セットには適用しないことを実装上明確にした。
 - tests/test_filter.py 22件を追加し pytest 86件全通過。CLAUDE.mdの箇条書き改行漏れも修正した。
 - 第1段階は全て完了。次は第2段階（Common Voiceの内容把握と整形）。data/common_voice_ja はcv-corpus-27.0-2026-09-11として展開済みで、版の改訂は目的に影響しないとユーザーが確認済み。
+
+### 2026-09-20 第2段階 2-2 クリップ一覧の作成
+- src/spkrate/data/common_voice.py と scripts/build_clips.py を実装。validated.tsv 300,315行から295,179件が残り（残存率98.29%）、data/processed/clips.jsonl（pyarrow未導入のためparquetから自動切替）と results/clip_filtering.md を生成した。
+- 除外内訳は down_votes 0、空文 0、unconverted 2,735、long_digit_run 0（unconvertedが先に一致するため）、音声長欠落 0、毎秒モーラ数の外れ値 2,401。
+- 毎秒モーラ数は最小1.001・Q1 3.813・中央値4.971・平均5.031・Q3 6.153・最大12.000、合計時間379.67時間（1クリップ平均4.630秒）。
+- 実データに1万字規模の文があり pyopenjtalk が異常終了したため、to_kana を2048バイト単位の分割変換に変更した。pytest 104件全通過。
+- 未解決は、parquetで保存したい場合の pyarrow 追加と、既存 scripts/classify_mora_mismatch.py の未使用import（ruff F401）。次は 2-3 の分割固定。
