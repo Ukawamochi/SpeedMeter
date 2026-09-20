@@ -4,8 +4,7 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
-data/
-!/data/
+# リポジトリ直下の data/ のみ無視する（src/spkrate/data/ は対象外）
 /data/*
 !/data/DATASETS.md
 runs/
