@@ -12,11 +12,12 @@
 
 ## 確認済みの取得記録
 
-以下は過去の取得完了時点の記録。以後の手動配置の進捗は反映していない。
-JVS・Common Voiceの配置状況は手動取得後に確認する。
+以下は過去の確認完了時点の記録。以後の手動配置の進捗は反映していない。
+JVSの配置状況は手動取得後に確認する。
 ファイル数とサイズは展開済みデータ本体の値で、data/.archives/ のアーカイブを含まない。
 
-| データセット | 配置場所 | 取得日 | 取得時の状態 | ファイル数 | 合計サイズ (bytes) | 内容・取得元 |
+| データセット | 配置場所 | 確認日 | 状態 | ファイル数 | 合計サイズ (bytes) | 内容・取得元 |
 |---|---|---|---|---:|---:|---|
 | jsut | data/jsut/ | 2026-09-20T20:32:14+09:00 | 取得済み | 22 | 1,027,376 | テキストのみ。https://ss-takashi.sakura.ne.jp/corpus/jsut_ver1.1.zip |
 | musan | data/musan/ | 2026-09-20T21:10:15+09:00 | 取得済み | 935 | 717,334,021 | noise サブセット。https://www.openslr.org/resources/17/musan.tar.gz; 公式MD5検証あり; mirror: https://openslr.elda.org/resources/17/musan.tar.gz |
+| common_voice_ja | data/common_voice_ja/ | 2026-09-20T22:47:00+09:00 | 取得済み | 585,341 | 約17,180,000,000（約16GiB） | Common Voice 日本語（cv-corpus-27.0-2026-09-11）。clips/ に音声585,330件、train/dev/test等のtsvを含む |
