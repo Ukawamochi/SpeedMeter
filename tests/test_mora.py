@@ -330,3 +330,39 @@ def test_filler_maa_sono():
     kana = to_kana("まあ、その、なんというか")
     assert kana == "マーソノナントイウカ"
     assert count_mora_from_kana(kana) == 10
+
+
+# 長文の分割（pyopenjtalkは長すぎる入力でプロセスごと異常終了する）
+def test_split_for_g2p_keeps_chunks_within_byte_limit():
+    from spkrate.labels.mora import _MAX_G2P_BYTES, _split_for_g2p
+
+    text = "あいうえお、" * 2000
+    chunks = _split_for_g2p(text)
+    assert len(chunks) > 1
+    assert all(len(chunk.encode("utf-8")) <= _MAX_G2P_BYTES for chunk in chunks)
+    assert "".join(chunks) == text
+
+
+def test_split_for_g2p_splits_without_punctuation():
+    """区切り文字が無い場合も強制的に分割し、元の文字列を保つ。"""
+    from spkrate.labels.mora import _MAX_G2P_BYTES, _split_for_g2p
+
+    text = "あ" * 3000
+    chunks = _split_for_g2p(text)
+    assert all(len(chunk.encode("utf-8")) <= _MAX_G2P_BYTES for chunk in chunks)
+    assert "".join(chunks) == text
+
+
+def test_split_for_g2p_returns_single_chunk_for_short_text():
+    from spkrate.labels.mora import _split_for_g2p
+
+    assert _split_for_g2p("今日はいい天気です") == ["今日はいい天気です"]
+
+
+def test_to_kana_handles_very_long_text():
+    """1万字規模の文でも異常終了せずカタカナ読みを返す。"""
+    text = "今日はいい天気です。" * 1000
+    kana = to_kana(text)
+    assert kana
+    assert not has_unconverted(kana)
+    assert count_mora_from_kana(kana) > 1000

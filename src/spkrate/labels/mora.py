@@ -30,6 +30,15 @@ _SMALL_COMBINING = frozenset("ャュョァィゥェォヮ")
 # P（約物）、Z（空白）、C（制御）は読み変換の失敗ではないため取り除く。
 _DISCARDED_CATEGORIES = ("P", "Z", "C")
 
+# pyopenjtalk（open_jtalk）は入力が長すぎるとプロセスごと異常終了する
+# （SIGABRT。実測ではUTF-8で約8192バイトを超えると落ちる）。
+# 実データには1万字を超える文が混ざっているため、余裕を持った長さで
+# 分割してから読み変換し、結果を連結する。
+_MAX_G2P_BYTES = 2048
+
+# 分割位置の候補。この文字の直後で切ると読みへの影響が小さい。
+_SPLIT_AFTER = "。．！？!?、，,・…\u3000 \t\n"
+
 
 def _drop_non_reading(raw: str) -> str:
     """読みに関係しない約物・空白・制御文字を取り除く。
@@ -42,10 +51,53 @@ def _drop_non_reading(raw: str) -> str:
     )
 
 
+def _split_for_g2p(text: str, max_bytes: int = _MAX_G2P_BYTES) -> list[str]:
+    """読み変換に渡せる長さの塊に分ける。
+
+    各塊のUTF-8バイト長が max_bytes 以下になるようにする。できるだけ
+    句読点などの直後で切り、切れる場所が無ければ文字境界で強制的に切る。
+    """
+    chunks: list[str] = []
+    current = ""
+    current_bytes = 0
+    boundary = -1  # current の中で最後に現れた分割候補の直後の位置
+    for ch in text:
+        size = len(ch.encode("utf-8"))
+        if current_bytes + size > max_bytes and current:
+            if boundary > 0:
+                chunks.append(current[:boundary])
+                current = current[boundary:]
+            else:
+                chunks.append(current)
+                current = ""
+            current_bytes = len(current.encode("utf-8"))
+            boundary = -1
+        current += ch
+        current_bytes += size
+        if ch in _SPLIT_AFTER:
+            boundary = len(current)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def to_kana(text: str) -> str:
-    """生テキストをNFKC正規化し、pyopenjtalkでカタカナ読みに変換する。"""
+    """生テキストをNFKC正規化し、pyopenjtalkでカタカナ読みに変換する。
+
+    長すぎる入力は pyopenjtalk がプロセスごと異常終了させるため、
+    _MAX_G2P_BYTES 以下の塊に分けて変換し、結果を連結する。分割した場合は
+    境界をまたぐ読みが変わりうるので警告を出す。
+    """
     normalized = unicodedata.normalize("NFKC", text)
-    raw = pyopenjtalk.g2p(normalized, kana=True)
+    chunks = _split_for_g2p(normalized)
+    if len(chunks) > 1:
+        logger.warning(
+            "入力が長いため%d個に分割して読み変換する（%d文字）。"
+            "分割境界の読みは正確でない可能性がある。",
+            len(chunks),
+            len(normalized),
+        )
+    raw = "".join(pyopenjtalk.g2p(chunk, kana=True) for chunk in chunks)
     return _drop_non_reading(raw)
 
 
