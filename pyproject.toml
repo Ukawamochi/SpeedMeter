@@ -17,6 +17,7 @@ dependencies = [
     "pyopenjtalk>=0.4.1",
     "pyroomacoustics>=0.10.1",
     "pyyaml>=6.0.3",
+    "scipy>=1.18.1",
     "soundfile>=0.14.0",
     "torch>=2.14.0",
     "torchaudio>=2.11.0",
