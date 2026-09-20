@@ -58,3 +58,10 @@
 - 毎秒モーラ数は最小1.001・Q1 3.813・中央値4.971・平均5.031・Q3 6.153・最大12.000、合計時間379.67時間（1クリップ平均4.630秒）。
 - 実データに1万字規模の文があり pyopenjtalk が異常終了したため、to_kana を2048バイト単位の分割変換に変更した。pytest 104件全通過。
 - 未解決は、parquetで保存したい場合の pyarrow 追加と、既存 scripts/classify_mora_mismatch.py の未使用import（ruff F401）。次は 2-3 の分割固定。
+
+### 2026-09-21 第2段階 Common Voiceの内容把握と整形（完了）
+- 2-1 内容確認: cv-corpus-27.0-2026-09-11は展開済み。validated 300,315行、clips 585,330件/14.69GiB、client_id 6,932人、全て32kHzモノラルmp3（16kHzへのリサンプリングが必要）。クリップ長は平均4.631秒・中央値3.960秒。results/common_voice_overview.md。
+- 2-2 クリップ一覧: 300,315件から unconverted 2,735件・外れ値2,401件を除外し残存295,179件（98.29%）、合計379.67時間。毎秒モーラ数は中央値4.971・平均5.031。long_digit_runは0件で、これは実装の不具合ではなくCommon Voiceのユニーク37,736文に3桁以上の数字列が存在しないため（別途確認済み）。data/processed/clips.jsonl（pyarrow未導入のためparquetではない）、results/clip_filtering.md。
+- 付随対処: pyopenjtalkがUTF-8約8192バイト超の入力でSIGABRTする問題に遭遇し、to_kanaに2048バイト単位の分割変換を追加した（仕様変更ではなく堅牢化）。.gitignoreの `data/` がsrc/spkrate/data/まで無視していたため直下のみを指す設定に修正した。
+- 2-3 分割の固定: client_id単位・シード20260921の貪欲法でクリップ数が8:1:1になるよう割当。train 3,467人/236,143件/304.80時間、dev 1,711人/29,518件/37.10時間、test 1,711人/29,518件/37.76時間。話者重複0を確認。test.jsonは第10段階まで使用禁止で、load_test_splitはstage10_approved=Trueなしでは例外を送出する。
+- pytest 121件全通過。未解決点なし。次は第3段階（ベースラインの実装と測定）。
