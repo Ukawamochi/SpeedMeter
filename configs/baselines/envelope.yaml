@@ -1,0 +1,19 @@
+# 信号処理ベースライン（docs/PLAN.md 第3段階 3-2）のパラメータ。
+# 実装: src/spkrate/baselines/envelope.py
+# 生成: scripts/run_envelope_baseline.py tune
+# 調整に使った集合: dev から seed=20260921 で抽出した 2000 件
+# 調整の記録: results/envelope_baseline_tuning.md
+# テストセットは調整に使っていない。
+params:
+  band_high_hz: 10.0
+  band_low_hz: 3.0
+  count_method: peak
+  filter_order: 3
+  floor_db: -60.0
+  frame_length_sec: 0.025
+  hop_sec: 0.01
+  min_peak_distance_sec: 0.06
+  mora_per_syllable: 1.5278
+  peak_prominence: 0.5
+  silence_floor_db: -20.0
+  smoothing_sec: 0.05
