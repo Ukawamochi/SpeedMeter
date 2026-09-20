@@ -1,0 +1,39 @@
+[project]
+name = "speakmeter"
+version = "0.1.0"
+description = "日本語音声から話速（毎秒モーラ数）をリアルタイムに推定する小型CNN"
+readme = "README.md"
+authors = [
+    { name = "Ukawamochi", email = "206811198+Ukawamochi@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "librosa>=1.0.0",
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.3",
+    "onnx>=1.23.0",
+    "onnxruntime>=1.30.0",
+    "pandas>=3.0.6",
+    "pyopenjtalk>=0.4.1",
+    "pyroomacoustics>=0.10.1",
+    "pyyaml>=6.0.3",
+    "soundfile>=0.14.0",
+    "torch>=2.14.0",
+    "torchaudio>=2.11.0",
+    "tqdm>=4.70.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "spkrate"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
