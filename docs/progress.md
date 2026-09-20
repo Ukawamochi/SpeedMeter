@@ -71,3 +71,10 @@
 - 取り決め: 話速帯は正解の毎秒モーラ数で区分し、該当0件の帯のMAEと分散0・件数1以下の相関はNaN（CSVでは空欄）。各帯の件数もn_band_*列に残す。
 - results/metrics.csv の列を experiment_id,timestamp,commit_hash,commit_dirty,config_path,method,split,num_segments,mae_*,n_band_*,correlation,latency_ms_per_inference,model_size_bytes に固定（ヘッダのみ変更、データ行は未追加）。テスト分割はstage10_approved=Trueなしでrunnerが拒否する。
 - pytest 169件全通過（新規48件）。実データ評価は3-2以降。所見: clipsは32kHzが大半だが48kHzの個体も存在するため、リサンプリングは実ファイルの標本化周波数から行う実装にした。
+
+### 2026-09-21 第3段階3-2 信号処理ベースライン（完了）
+- src/spkrate/baselines/envelope.py を実装。RMS包絡→デシベル化→平滑化→2〜10Hz帯域通過（Butterworth零位相）→無音ゲート付きのピーク計数→換算係数でモーラ数化。デシベル領域で処理するため録音レベルに依存しない。
+- 調整はdevから固定シード20260921で抽出した2000件で実施（包絡をキャッシュして座標降下法2巡）。採用値は帯域3〜10Hz・平滑化0.05秒・突出量0.5dB・最小間隔0.06秒・無音閾値-20dB・換算係数1.5278（部分集合MAE 0.8675）。ピーク計数はゼロ交差計数より良い（0.9284）。configs/baselines/envelope.yaml、results/envelope_baseline_tuning.md。
+- dev全件29,518クリップ（37.1時間、0.36分）で評価しmetrics.csvに実験ID 003-envelope-baseline を追記。MAE 0.8961、帯別 under4=0.8399 / 4to6=0.7284 / 6to8=0.8737 / over8=2.1677、相関0.7670、1推論0.416ミリ秒。
+- 帯域候補はPLAN 3-2の指定（2〜10Hz）の内側に限った。16Hzまで広げても改善は0.007以下で不採用（記録は調整md）。依存にscipyを明示追加。
+- pytest 214件全通過（新規45件、合成パルス列で計数が一致することを確認）。未解決点は毎秒8モーラ以上の帯の誤差が他の2倍以上あること。次は3-3。
