@@ -65,3 +65,9 @@
 - 付随対処: pyopenjtalkがUTF-8約8192バイト超の入力でSIGABRTする問題に遭遇し、to_kanaに2048バイト単位の分割変換を追加した（仕様変更ではなく堅牢化）。.gitignoreの `data/` がsrc/spkrate/data/まで無視していたため直下のみを指す設定に修正した。
 - 2-3 分割の固定: client_id単位・シード20260921の貪欲法でクリップ数が8:1:1になるよう割当。train 3,467人/236,143件/304.80時間、dev 1,711人/29,518件/37.10時間、test 1,711人/29,518件/37.76時間。話者重複0を確認。test.jsonは第10段階まで使用禁止で、load_test_splitはstage10_approved=Trueなしでは例外を送出する。
 - pytest 121件全通過。未解決点なし。次は第3段階（ベースラインの実装と測定）。
+
+### 2026-09-21 第3段階3-1 評価基盤（完了）
+- src/spkrate/eval/metrics.py（毎秒モーラ数のMAE・話速帯別MAE・ピアソン相関）、audio.py（16kHzモノラルへの読み込み）、runner.py（推定器の適用とmetrics.csvへの追記）を実装。
+- 取り決め: 話速帯は正解の毎秒モーラ数で区分し、該当0件の帯のMAEと分散0・件数1以下の相関はNaN（CSVでは空欄）。各帯の件数もn_band_*列に残す。
+- results/metrics.csv の列を experiment_id,timestamp,commit_hash,commit_dirty,config_path,method,split,num_segments,mae_*,n_band_*,correlation,latency_ms_per_inference,model_size_bytes に固定（ヘッダのみ変更、データ行は未追加）。テスト分割はstage10_approved=Trueなしでrunnerが拒否する。
+- pytest 169件全通過（新規48件）。実データ評価は3-2以降。所見: clipsは32kHzが大半だが48kHzの個体も存在するため、リサンプリングは実ファイルの標本化周波数から行う実装にした。
