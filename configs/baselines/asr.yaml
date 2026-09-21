@@ -1,0 +1,15 @@
+# 書き起こしベースライン（docs/PLAN.md 第3段階 3-3）の設定。
+# 実装: src/spkrate/baselines/asr.py
+# 実行: scripts/run_asr_baseline.py eval
+# 選定理由と候補の比較: docs/decisions/003-asr-baseline.md
+# 選定は検証セット（dev）から抽出した100件のみで行い、テストセットは使っていない。
+params:
+  beam_size: 1
+  compute_type: float32
+  condition_on_previous_text: false
+  cpu_threads: 0
+  device: cpu
+  language: ja
+  model_name: Systran/faster-whisper-small
+  vad_filter: false
+  without_timestamps: true
