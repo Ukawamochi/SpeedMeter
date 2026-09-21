@@ -139,3 +139,10 @@
 - 音声100件はコピーするが .gitignore に /results/error_cases/*.mp3 を追加してコミットしない（Common Voice は再ホスト・再共有が禁止、Public リポジトリ）。index.tsv と README.md はコミットした。
 - 第4段階4-3が5-4に課したD1〜D3を実施（scripts/window_diagnostics.py、src/spkrate/eval/window_diag.py、mps、CPUフォールバック無し）。D1=0.4360 mora/s（閾値B1 0.25を超過）、D2はデジタル無音0.0824モーラ（B2 1.0を超過しない）・MUSAN noise 4.7024モーラ（超過）、D3=0.0568 mora/s（B5の0.25を超過せず、B5は不成立）。results/window_diagnostics.md。
 - 採否の判断は書いていない（第7段階7-1）。docs/experiments/003-first-model.md 5.2節の更新は未実施で申し送る。pytest 390件全通過（新規15件）。
+
+### 2026-09-21 第6段階6-2 テキスト面の分析（完了）
+- index.tsv 上位100件を音声を聴かずに排他分類（優先順位 A ラベル誤り＞D 特殊表記＞B 極端な長さ＞C 分布の端＞E 判断不能）。A=6・B=30・C=25・D=2・E=37。非排他では C が52件・D が6件で、重なりは results/error_analysis_text.md の2.2節に併記した。
+- 閾値は明文化。B は dev のクリップ長 第5/第95百分位 1.98/9.396秒（2.0秒未満・9.4秒以上）、C は clip_filtering.md のヒストグラムから補間した第1/第99百分位 1.46/9.39（1.5未満・9.4超）、D は NFKC後の正規表現4条件。
+- A の6件は英文・ローマ字のアルファベット読み展開（taishouyatteru で+21モーラ、英文で+40モーラ超）、五六匹→ゴジューロッピキの位取り読み、昔し→ムカシシ。学習用の除外は dev に適用されないため残存。
+- 上位100件は全件が過小推定で over8 が75件（dev では6.83%）、9.4超が52件（dev では1.66%）、under4・4to6 は0件。母集団を代表せず、C・B の件数は抽出方法で構造的に押し上がり、A・D の頻度は推定できない。
+- E の37件は6-3の聴取対象。clip_id 一覧を results/error_analysis_text.md 5節と results/error_cases/to_listen.tsv に出した。
