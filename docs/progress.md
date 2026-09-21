@@ -112,3 +112,10 @@
 - 詰め物は入口と各層の出力で0に戻し、softplus の後にマスクしてから総和する。単独で流した場合と詰め物0/1/100/500フレーム付きで流した場合の一致を rtol=1e-4, atol=1e-4 で固定した。バッチ・時間方向を混ぜる正規化は使えないため norm は none / layer のみ。
 - pytest 351件全通過（新規37件）。mps で前向き・逆伝播とも通り、PYTORCH_ENABLE_MPS_FALLBACK=0 でもCPUフォールバックは発生しなかった。学習は未実施。
 - 未解決は norm・dropout の既定値（none / 0.0）が測定に基づかないこと、時間段の入力640チャネルが第8段階の推論速度に効く可能性があること。次は5-2。
+
+### 2026-09-21 第5段階5-2 学習ループ（完了）
+- src/spkrate/train/train.py と src/spkrate/train/data.py、configs/exp000_smoke.yaml。損失は train.loss で mse / poisson を切り替え（ポアソンは log_input=False, eps=1e-8）、デバイスは mps、出力は runs/<実験ID>/ に log.txt・metrics.jsonl・config_snapshot.yaml（コミットハッシュと設定全文）・checkpoint_best.pt / checkpoint_last.pt。
+- データ供給は2経路。拡張なしは事前計算特徴量を memmap で読み、拡張ありは波形から都度計算する（拡張あり×事前計算特徴量の組み合わせは ValueError で拒否）。長さでまとめるバッチ分け（無作為→塊ごとに長さで整列→バッチ順を無作為化）を既定で使う。検証は常に dev の事前計算特徴量で拡張なし。
+- 完走確認: configs/exp000_smoke.yaml（学習512件・検証256件・3エポック・mse）を mps でバックグラウンド実行し約75秒で完走。metrics.jsonl 3行、最良エポック2（毎秒モーラ数MAE 1.833）。PYTORCH_ENABLE_MPS_FALLBACK=1 でもCPUフォールバックは検出されず。指標は完走確認用で比較には使わない（results/metrics.csv には残していない）。
+- pytest 375件全通過（新規24件）。config_snapshot.yaml の書き出しで yaml.safe_dump が str の派生型（torch.__version__）を拒否する不具合を直した。
+- 未解決は学習率・エポック数などの最適化設定が未検討で3エポック目に検証損失が跳ねたこと（5-3の本番設定で見直す）。次は5-3。
