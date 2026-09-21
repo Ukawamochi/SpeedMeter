@@ -170,17 +170,34 @@ def main(argv: list[str] | None = None) -> int:
                  for _ in range(args.d2_windows)]
         noise_rms = [float(np.sqrt(np.mean(np.square(w, dtype=np.float32)))) for w in noise]
         noise_pred = predict(noise)
+        # 参考（005の定義には無い追加測定）。005 は MUSAN noise の音量を指定していないので、
+        # 元の振幅のままの値に加え、dev の音声と実効値を揃えた場合の値も測っておく。
+        speech_rms = [
+            float(np.sqrt(np.mean(np.square(w, dtype=np.float32))))
+            for _, w in d1_waveforms
+        ]
+        target_rms = float(np.median(np.asarray(speech_rms, dtype=np.float32)))
+        scaled = [
+            np.asarray(w * np.float32(target_rms / max(r, 1e-8)), dtype=np.float32)
+            for w, r in zip(noise, noise_rms, strict=True)
+        ]
+        scaled_pred = predict(scaled)
         d2_value = max(float(np.mean(silence_pred)), float(np.mean(noise_pred)))
         summary["D2"] = {
             "silence_mora": summarize(silence_pred.tolist()),
             "musan_noise_mora": summarize(noise_pred.tolist()),
             "musan_noise_rms": summarize(noise_rms),
+            "dev_speech_rms_median": target_rms,
+            "musan_noise_rms_matched_mora": summarize(scaled_pred.tolist()),
             "value_for_threshold_mora": d2_value,
             "threshold_B2": THRESHOLD_B2,
+            "exceeds_B2_silence": bool(float(np.mean(silence_pred)) > THRESHOLD_B2),
+            "exceeds_B2_musan_noise": bool(float(np.mean(noise_pred)) > THRESHOLD_B2),
             "exceeds_B2": bool(d2_value > THRESHOLD_B2),
         }
         log(f"D2: silence_mean={float(np.mean(silence_pred)):.4f} "
-            f"noise_mean={float(np.mean(noise_pred)):.4f} mora")
+            f"noise_mean={float(np.mean(noise_pred)):.4f} "
+            f"noise_rms_matched_mean={float(np.mean(scaled_pred)):.4f} mora")
 
         # ------------------------------------------------------------------ D3
         log("D3: dev から2件ずつ連結する")
@@ -230,10 +247,12 @@ def main(argv: list[str] | None = None) -> int:
 def render_markdown(s: dict) -> str:
     """results/window_diagnostics.md を組み立てる（事実のみ。判断は書かない）。"""
     d1, d2, d3 = s["D1"], s["D2"], s["D3"]
-    b1 = "**超過**" if d1["exceeds_B1"] else "超過しない"
-    b2 = "**超過**" if d2["exceeds_B2"] else "超過しない"
-    b5_own = "**超過**" if d3["exceeds_B5_own_threshold"] else "超過しない"
-    b5 = "**該当**" if (d3["exceeds_B5_own_threshold"] and d1["exceeds_B1"]) else "該当しない"
+    b1 = "超過" if d1["exceeds_B1"] else "超過しない"
+    b2 = "超過" if d2["exceeds_B2"] else "超過しない"
+    b2_silence = "超過" if d2["exceeds_B2_silence"] else "超過しない"
+    b2_noise = "超過" if d2["exceeds_B2_musan_noise"] else "超過しない"
+    b5_own = "超過" if d3["exceeds_B5_own_threshold"] else "超過しない"
+    b5 = "該当" if (d3["exceeds_B5_own_threshold"] and d1["exceeds_B1"]) else "該当しない"
     events = s["mps_cpu_fallback_events"]
     fallback = (
         "無し"
@@ -272,7 +291,7 @@ def render_markdown(s: dict) -> str:
 | 標準偏差 | {d1['abs_error_mora_per_sec']['std']:.4f} mora/s |
 | 符号つき (Σ − P)/(2.0m) の平均 | {d1['signed_error_mora_per_sec_mean']:+.4f} mora/s |
 
-- 閾値 **B1: D1 > {d1['threshold_B1']} mora/s** に対して **{b1}**（{d1['abs_error_mora_per_sec']['mean']:.4f} vs {d1['threshold_B1']}）
+- 閾値 **B1: D1 > {d1['threshold_B1']} mora/s** に対して **{b1}**（測定値 {d1['abs_error_mora_per_sec']['mean']:.4f} vs 閾値 {d1['threshold_B1']}）
 
 ## D2 無音・雑音窓の出力
 
@@ -283,9 +302,17 @@ def render_markdown(s: dict) -> str:
 | デジタル無音 | {d2['silence_mora']['count']} | **{d2['silence_mora']['mean']:.4f}** | {d2['silence_mora']['median']:.4f} | {d2['silence_mora']['max']:.4f} | {d2['silence_mora']['std']:.4f} |
 | MUSAN noise | {d2['musan_noise_mora']['count']} | **{d2['musan_noise_mora']['mean']:.4f}** | {d2['musan_noise_mora']['median']:.4f} | {d2['musan_noise_mora']['max']:.4f} | {d2['musan_noise_mora']['std']:.4f} |
 
-MUSAN noise の窓は元ファイルの振幅のまま（音量を合わせる操作はしていない）。実効値の平均 {d2['musan_noise_rms']['mean']:.5f}、中央値 {d2['musan_noise_rms']['median']:.5f}、最大 {d2['musan_noise_rms']['max']:.5f}。
+MUSAN noise の窓は元ファイルの振幅のままで、音量を合わせる操作はしていない（005 は D2 の音量を指定していない）。
+実効値は平均 {d2['musan_noise_rms']['mean']:.5f}、中央値 {d2['musan_noise_rms']['median']:.5f}、最大 {d2['musan_noise_rms']['max']:.5f}。
 
-- 閾値 **B2: D2 > {d2['threshold_B2']} モーラ** に対して **{b2}**（2種のうち大きい方 {d2['value_for_threshold_mora']:.4f} vs {d2['threshold_B2']}）
+**参考（005の定義には無い追加測定）**: 同じ500本を dev 音声の実効値の中央値 {d2['dev_speech_rms_median']:.5f} に
+揃え直して推論すると、平均 {d2['musan_noise_rms_matched_mora']['mean']:.4f} モーラ（中央値 {d2['musan_noise_rms_matched_mora']['median']:.4f}、最大 {d2['musan_noise_rms_matched_mora']['max']:.4f}）。
+
+閾値 **B2: D2 > {d2['threshold_B2']} モーラ** に対して:
+
+- デジタル無音 {d2['silence_mora']['mean']:.4f} モーラ → **{b2_silence}**
+- MUSAN noise {d2['musan_noise_mora']['mean']:.4f} モーラ → **{b2_noise}**
+- 2種のうち大きい方 {d2['value_for_threshold_mora']:.4f} モーラ → **{b2}**
 
 ## D3 連結加法性
 
@@ -304,7 +331,7 @@ dev から2件ずつ組にして 0.2秒の無音を挟んで連結し、`P(AB)` 
 | 第9十分位 | {d3['abs_error_mora_per_sec']['p90']:.4f} mora/s |
 | 最大 | {d3['abs_error_mora_per_sec']['max']:.4f} mora/s |
 
-- 閾値 **B5: D3 > {d3['threshold_B5']} mora/s**（D1 との併発時のみ）に対して、D3 単独では **{b5_own}**。D1 との併発を含めた B5 の成立は **{b5}**
+- 閾値 **B5: D3 > {d3['threshold_B5']} mora/s**（D1 との併発時のみ）に対して、D3 単独では **{b5_own}**（測定値 {d3['abs_error_mora_per_sec']['mean']:.4f}）。D1 との併発を含めた B5 の成立は **{b5}**
 
 ---
 
@@ -312,9 +339,10 @@ dev から2件ずつ組にして 0.2秒の無音を挟んで連結し、`P(AB)` 
 
 | 条件 | 閾値 | 測定値 | 超過 |
 | --- | ---: | ---: | --- |
-| B1 | D1 > {d1['threshold_B1']} mora/s | {d1['abs_error_mora_per_sec']['mean']:.4f} | {b1} |
-| B2 | D2 > {d2['threshold_B2']} モーラ | {d2['value_for_threshold_mora']:.4f} | {b2} |
-| B5 | D3 > {d3['threshold_B5']} mora/s かつ B1 成立 | D3={d3['abs_error_mora_per_sec']['mean']:.4f} / B1={'成立' if d1['exceeds_B1'] else '不成立'} | {b5} |
+| B1 | D1 > {d1['threshold_B1']} mora/s | D1={d1['abs_error_mora_per_sec']['mean']:.4f} | **{b1}** |
+| B2（デジタル無音） | D2 > {d2['threshold_B2']} モーラ | {d2['silence_mora']['mean']:.4f} | **{b2_silence}** |
+| B2（MUSAN noise） | D2 > {d2['threshold_B2']} モーラ | {d2['musan_noise_mora']['mean']:.4f} | **{b2_noise}** |
+| B5 | D3 > {d3['threshold_B5']} mora/s かつ B1 成立 | D3={d3['abs_error_mora_per_sec']['mean']:.4f} / B1={'成立' if d1['exceeds_B1'] else '不成立'} | **{b5}** |
 
 採否の判断は行わない（第7段階7-1）。
 
