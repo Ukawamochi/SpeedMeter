@@ -1,0 +1,46 @@
+# 学習ループの完走確認用の設定（docs/PLAN.md 第5段階 5-2の完了条件）
+# 実装: src/spkrate/train/train.py
+#
+# これは**本番の学習ではない**。「短い設定（少数クリップ、数エポック）で学習が完走し、
+# metrics.jsonl が生成される」ことだけを確かめるための設定である。
+# 件数もエポック数も小さいので、ここで出る指標に意味は無い。
+# 標準的な設定での学習は 5-3 の configs/exp001.yaml で行う。
+#
+# 実行:
+#   uv run python -m spkrate.train.train --config configs/exp000_smoke.yaml
+
+experiment_id: exp000_smoke
+seed: 20260921
+device: mps          # CLAUDE.md「学習デバイスはmps」
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: 5-2の完走確認。少数クリップ・数エポックのみ。指標の比較には使わない
+
+data:
+  # 拡張なしの経路。事前計算済み特徴量を読む（docs/decisions/006-augmentation.md 1節）
+  source: features
+  dev_source: features
+  features_dir: data/processed/features
+  train_split: configs/splits/train.json
+  dev_split: configs/splits/dev.json     # 検証は dev のみ。test.json は使わない
+  max_train_clips: 512
+  max_dev_clips: 256
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+augment:
+  enabled: false     # 拡張ありの経路（波形から都度計算）は 5-3 以降で使う
+
+train:
+  epochs: 3
+  batch_size: 16
+  loss: mse          # mse か poisson（docs/spec.md「損失」）
+  learning_rate: 0.001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 2
+  bucketing: true            # 長さの近いものを同じバッチに集める（005の4.2節）
+  bucket_pool_batches: 20
+  best_metric: mae_moras_per_sec
+  log_interval: 10
+  record_metrics_csv: false  # 完走確認なので results/metrics.csv には残さない
