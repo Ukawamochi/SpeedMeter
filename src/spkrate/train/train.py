@@ -1,0 +1,1124 @@
+"""話速推定CNNの学習ループ（docs/PLAN.md 第5段階 5-2）。
+
+docs/decisions/005-window-strategy.md の方式Aで学習する。1件の入力はクリップ全体、
+1件の正解はそのクリップの**モーラ数**である。毎秒モーラ数への換算は評価のときだけ行い、
+``spkrate.eval.metrics.compute_metrics`` に「モーラ数と区間長」を渡す。
+
+## 実行
+
+    uv run python -m spkrate.train.train --config configs/exp000_smoke.yaml
+
+出力は ``runs/<実験ID>/`` に集約する。
+
+| ファイル | 中身 |
+| --- | --- |
+| ``log.txt`` | 実行ログ（バックグラウンド実行を前提に、標準出力と同じ内容をファイルへ書く） |
+| ``metrics.jsonl`` | エポックごとに1行。検証セットの全指標と学習損失 |
+| ``config_snapshot.yaml`` | gitのコミットハッシュ、設定ファイルの内容、解決後の設定、モデルの要約、乱数シード |
+| ``checkpoint_best.pt`` / ``checkpoint_last.pt`` | 最良と最新のチェックポイント |
+
+## 損失の切り替え（docs/spec.md「損失: 二乗誤差とポアソン損失を比較する」）
+
+``train.loss`` に ``mse`` か ``poisson`` を書く。``build_loss`` が対応する関数を返す。
+
+**ポアソン損失の実装と数値安定性**。モデルの出力はフレームごとの softplus の総和なので
+常に正の実数であり、そのままポアソン分布の平均 λ とみなせる。したがって
+``torch.nn.PoissonNLLLoss(log_input=False, full=False, eps=POISSON_EPS)`` を使い、
+
+    損失 = λ - k·log(λ + eps)      （k は正解のモーラ数）
+
+を最小化する。``log_input=True``（出力を log λ と解釈する経路）は使わない。出力は
+λ そのものであり、log を取って指数へ戻すと、詰め物のフレームが厳密に0であるという
+本実装の性質（005の4.2節）と噛み合わないうえ、λ が大きいときに exp が溢れるためである。
+``eps`` は λ が0に潰れた場合の ``log(0) = -inf`` を防ぐ。softplus の出力は数学的には
+正だが、入力が -100 程度まで下がると float32 では0に丸まるため、この保護が要る。
+``full=False`` は Stirling 近似の項（k·log k - k + log(2πk)/2）を落とす指定である。
+この項はパラメータに依存しない定数なので勾配に影響しない。**エポック間・設定間で
+損失の値を比べるときは、この定数ぶんだけ二乗誤差と尺度が違う**点に注意する
+（比較に使う指標は ``metrics.jsonl`` の毎秒モーラ数MAEであって損失の値ではない）。
+
+## デバイスとMPS
+
+CLAUDE.md の規定により学習デバイスは ``mps``、float64 は使わない、``torch.compile`` は
+使わない。MPS未対応の演算によるCPUフォールバックが起きた場合は、PyTorch が出す警告を
+``MpsFallbackWatcher`` が捕まえ、演算子の名前と発生箇所（Pythonの呼び出し位置）を
+``log.txt`` に記録する。環境変数 ``PYTORCH_ENABLE_MPS_FALLBACK`` が未設定のときは
+フォールバックせず例外になるので、その場合も例外の内容がログに残る。
+
+## テストセット
+
+検証には ``configs/splits/dev.json`` のみを使う。``configs/splits/test.json`` は
+docs/PLAN.md 第10段階まで使用禁止であり、``spkrate.data.splits.load_split`` が
+読み出しを拒否する。この学習ループには ``stage10_approved`` を渡す口を作らない。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import math
+import os
+import platform
+import random
+import sys
+import time
+import traceback
+import warnings
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass, field, fields
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+import yaml
+from torch import Tensor, nn
+from torch.utils.data import DataLoader, Dataset
+
+from spkrate.data.augment import AugmentConfig
+from spkrate.eval.metrics import SpeedRateMetrics, compute_metrics
+from spkrate.eval.runner import git_commit_info
+from spkrate.models.cnn import CnnConfig, SpeechRateCNN, model_summary
+from spkrate.train.data import (
+    Batch,
+    FeatureClipDataset,
+    LengthBucketBatchSampler,
+    Normalizer,
+    WaveformClipDataset,
+    collate_clips,
+    load_normalization,
+    select_clip_records,
+)
+
+__all__ = [
+    "AugmentSettings",
+    "DataSettings",
+    "LOSSES",
+    "POISSON_EPS",
+    "MpsFallbackWatcher",
+    "TrainConfig",
+    "TrainSettings",
+    "TrainingOutcome",
+    "build_loss",
+    "build_datasets",
+    "evaluate_dev",
+    "load_checkpoint",
+    "load_train_config",
+    "resolve_device",
+    "run_training",
+    "save_checkpoint",
+    "write_config_snapshot",
+]
+
+LOSSES: tuple[str, ...] = ("mse", "poisson")
+
+# ポアソン損失の log(λ) を守る下駄。docstring「ポアソン損失の実装と数値安定性」を参照。
+POISSON_EPS = 1e-8
+
+LOGGER_NAME = "spkrate.train"
+
+
+# --------------------------------------------------------------------------------------
+# 設定
+
+
+def _reject_unknown(cls: type, mapping: dict[str, Any]) -> dict[str, Any]:
+    known = {f.name for f in fields(cls)}
+    unknown = sorted(set(mapping) - known)
+    if unknown:
+        raise ValueError(f"{cls.__name__} に未知の設定項目: {unknown}")
+    return dict(mapping)
+
+
+@dataclass(frozen=True)
+class DataSettings:
+    """データの出どころ（docs/decisions/006-augmentation.md 1節の2経路）。
+
+    Attributes:
+        source: 学習データの経路。``features``（事前計算済み）か ``waveform``（都度計算）。
+            ``None`` なら拡張の有無から決める（拡張ありなら waveform）。
+        dev_source: 検証データの経路。既定は ``features``（検証に拡張は掛けない）。
+        features_dir: 事前計算特徴量の親ディレクトリ。直下に ``train`` / ``dev`` がある。
+        clips_jsonl: クリップ一覧。waveform 経路で使う。
+        audio_root: 音声の親ディレクトリ。``ClipRecord.audio_path`` を解決する。
+        train_split / dev_split: 分割ファイル。test.json は渡せない。
+        max_train_clips / max_dev_clips: 件数の上限（試走用）。
+        max_frames: これを超える長さのクリップを学習から外す（``None`` で無制限）。
+        normalization: configs/normalization.yaml のパス。
+        normalization_mode: ``per_mel`` か ``global``。``None`` なら yaml の既定。
+    """
+
+    source: str | None = None
+    dev_source: str = "features"
+    features_dir: str = "data/processed/features"
+    clips_jsonl: str = "data/processed/clips.jsonl"
+    audio_root: str = "data/common_voice_ja"
+    train_split: str = "configs/splits/train.json"
+    dev_split: str = "configs/splits/dev.json"
+    max_train_clips: int | None = None
+    max_dev_clips: int | None = None
+    max_frames: int | None = None
+    normalization: str = "configs/normalization.yaml"
+    normalization_mode: str | None = None
+
+    @classmethod
+    def from_mapping(cls, mapping: dict[str, Any] | None) -> "DataSettings":
+        return cls(**_reject_unknown(cls, mapping or {}))
+
+
+@dataclass(frozen=True)
+class AugmentSettings:
+    """データ拡張の設定（docs/decisions/006-augmentation.md）。
+
+    ``enabled`` が False のときは拡張を一切掛けない。``params`` は
+    ``spkrate.data.augment.AugmentConfig`` の項目をそのまま受ける。
+    ``musan_root`` を与えると雑音重畳に MUSAN の noise サブセットを使う。
+    """
+
+    enabled: bool = False
+    params: dict[str, Any] = field(default_factory=dict)
+    musan_root: str | None = None
+
+    @classmethod
+    def from_mapping(cls, mapping: dict[str, Any] | None) -> "AugmentSettings":
+        return cls(**_reject_unknown(cls, mapping or {}))
+
+    def build(self) -> AugmentConfig | None:
+        """``AugmentConfig`` を作る。無効なら ``None``。"""
+        if not self.enabled:
+            return None
+        return AugmentConfig.from_mapping(self.params)
+
+
+@dataclass(frozen=True)
+class TrainSettings:
+    """最適化と実行の設定。
+
+    Attributes:
+        epochs: エポック数。
+        batch_size: バッチの件数。
+        loss: ``mse`` か ``poisson``（docs/spec.md「損失」）。
+        learning_rate / weight_decay: Adam の設定。
+        grad_clip: 勾配のノルムの上限。0以下で無効。
+        num_workers: DataLoader のワーカー数。
+        bucketing: 長さの近いものを同じバッチに集めるか（data.py の docstring を参照）。
+        bucket_pool_batches: 長さで整列する塊の大きさ（バッチ数）。
+        best_metric: 最良のチェックポイントを決める指標名。``metrics.jsonl`` の列名。
+        best_mode: ``min`` か ``max``。``None`` なら指標名から決める。
+        log_interval: 学習中に損失を書き出す間隔（バッチ数）。
+        record_metrics_csv: 学習の最後に results/metrics.csv へ1行追記するか。
+        metrics_csv: 追記先。
+    """
+
+    epochs: int = 10
+    batch_size: int = 16
+    loss: str = "mse"
+    learning_rate: float = 1e-3
+    weight_decay: float = 0.0
+    grad_clip: float = 5.0
+    num_workers: int = 0
+    bucketing: bool = True
+    bucket_pool_batches: int = 20
+    best_metric: str = "mae_moras_per_sec"
+    best_mode: str | None = None
+    log_interval: int = 50
+    record_metrics_csv: bool = False
+    metrics_csv: str = "results/metrics.csv"
+
+    @classmethod
+    def from_mapping(cls, mapping: dict[str, Any] | None) -> "TrainSettings":
+        return cls(**_reject_unknown(cls, mapping or {}))
+
+    @property
+    def resolved_best_mode(self) -> str:
+        if self.best_mode is not None:
+            if self.best_mode not in {"min", "max"}:
+                raise ValueError(f"best_mode は min か max: {self.best_mode}")
+            return self.best_mode
+        # 誤差と損失は小さいほど良い。相関は大きいほど良い。
+        return "max" if "correlation" in self.best_metric else "min"
+
+
+@dataclass(frozen=True)
+class TrainConfig:
+    """1回の学習の設定一式。yaml の最上位がそのままこの形である。"""
+
+    experiment_id: str
+    seed: int = 20260921
+    device: str = "mps"
+    runs_dir: str = "runs"
+    model_config: str = "configs/model/cnn_base.yaml"
+    model_overrides: dict[str, Any] = field(default_factory=dict)
+    data: DataSettings = field(default_factory=DataSettings)
+    train: TrainSettings = field(default_factory=TrainSettings)
+    augment: AugmentSettings = field(default_factory=AugmentSettings)
+    notes: str = ""
+    config_path: str = ""
+
+    @classmethod
+    def from_mapping(cls, mapping: dict[str, Any]) -> "TrainConfig":
+        payload = dict(mapping)
+        data = DataSettings.from_mapping(payload.pop("data", None))
+        train = TrainSettings.from_mapping(payload.pop("train", None))
+        augment = AugmentSettings.from_mapping(payload.pop("augment", None))
+        payload = _reject_unknown(cls, payload)
+        if "experiment_id" not in payload:
+            raise ValueError("experiment_id が設定に無い")
+        return cls(**payload, data=data, train=train, augment=augment)
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def with_changes(self, **changes: Any) -> "TrainConfig":
+        """一部の項目だけを差し替えた設定を作る（コマンドラインの上書き用）。"""
+        from dataclasses import replace as _replace
+
+        return _replace(self, **changes)
+
+    @property
+    def run_dir(self) -> Path:
+        return Path(self.runs_dir) / self.experiment_id
+
+    @property
+    def train_source(self) -> str:
+        """学習データの経路。未指定なら拡張の有無から決める（006の1節）。"""
+        if self.data.source is not None:
+            return self.data.source
+        return "waveform" if self.augment.enabled else "features"
+
+    def build_model_config(self) -> CnnConfig:
+        """モデル構造の設定を読み、``model_overrides`` を重ねる。"""
+        from spkrate.models.cnn import load_config
+
+        base = load_config(self.model_config)
+        if not self.model_overrides:
+            return base
+        return CnnConfig.from_dict({**base.as_dict(), **self.model_overrides})
+
+
+def load_train_config(path: str | Path) -> TrainConfig:
+    """学習の設定ファイル（yaml）を読む。未知の項目は誤りとして弾く。"""
+    path = Path(path)
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"設定ファイルの最上位が辞書でない: {path}")
+    payload.setdefault("config_path", str(path))
+    return TrainConfig.from_mapping(payload)
+
+
+# --------------------------------------------------------------------------------------
+# 損失
+
+
+def _mse_loss(prediction: Tensor, target: Tensor) -> Tensor:
+    """二乗誤差（クリップごとのモーラ数に対する平均）。"""
+    return torch.nn.functional.mse_loss(prediction, target)
+
+
+class PoissonLoss(nn.Module):
+    """ポアソン損失。モジュール docstring「ポアソン損失の実装と数値安定性」を参照。
+
+    モデルの出力 λ（softplus の総和、常に正）をポアソン分布の平均とみなし、
+
+        損失 = λ - k·log(λ + eps)
+
+    を最小化する。``log_input=False`` を使うのは出力が λ そのものだからであり、
+    ``eps``（既定 ``POISSON_EPS`` = 1e-8）は λ が float32 で0に丸まったときの
+    ``log(0) = -inf`` を防ぐ。``full=False`` で落としている Stirling 項は
+    パラメータに依存しない定数で、勾配には影響しない。
+    """
+
+    def __init__(self, eps: float = POISSON_EPS) -> None:
+        super().__init__()
+        self.eps = float(eps)
+        self._loss = nn.PoissonNLLLoss(
+            log_input=False, full=False, eps=self.eps, reduction="mean"
+        )
+
+    def forward(self, prediction: Tensor, target: Tensor) -> Tensor:
+        if torch.any(prediction < 0):
+            raise ValueError("ポアソン損失には非負の予測が必要（softplus の総和を想定）")
+        return self._loss(prediction, target)
+
+    def extra_repr(self) -> str:
+        return f"log_input=False, full=False, eps={self.eps}"
+
+
+def build_loss(name: str) -> Callable[[Tensor, Tensor], Tensor]:
+    """設定の文字列から損失関数を作る（docs/spec.md「損失」）。
+
+    Args:
+        name: ``mse``（二乗誤差）か ``poisson``（ポアソン損失）。
+
+    Raises:
+        ValueError: 未知の名前のとき。設定の書き間違いを黙って既定値で通さない。
+    """
+    if name == "mse":
+        return _mse_loss
+    if name == "poisson":
+        return PoissonLoss()
+    raise ValueError(f"loss は {LOSSES} のいずれか: {name}")
+
+
+# --------------------------------------------------------------------------------------
+# デバイスとMPSのフォールバック
+
+
+def resolve_device(name: str, logger: logging.Logger | None = None) -> torch.device:
+    """設定のデバイス名を ``torch.device`` にする。
+
+    CLAUDE.md の規定では ``mps`` を使う。``mps`` が使えない環境では警告を出して
+    ``cpu`` に落とす（黙って落とすと、どこで学習したのか後から分からなくなるため
+    必ずログに残す）。``auto`` は使える方を選ぶ。
+    """
+    log = logger or logging.getLogger(LOGGER_NAME)
+    available = torch.backends.mps.is_available()
+    if name == "auto":
+        return torch.device("mps" if available else "cpu")
+    if name == "mps" and not available:
+        log.warning("mps が使えないため cpu で実行する（CLAUDE.md の規定は mps）")
+        return torch.device("cpu")
+    return torch.device(name)
+
+
+class MpsFallbackWatcher:
+    """MPS未対応の演算によるCPUフォールバックを捕まえてログに残す。
+
+    PyTorch は未対応の演算で ``UserWarning: The operator 'aten::xxx' is not currently
+    supported on the MPS backend and will fall back to run on the CPU.`` を出す
+    （環境変数 ``PYTORCH_ENABLE_MPS_FALLBACK=1`` のとき）。この警告を横取りし、
+    演算子の名前と発生箇所（リポジトリ内のPythonの呼び出し位置）を記録する。
+    同じ演算子は最初の1回だけ記録する。
+
+    環境変数が未設定のときはフォールバックせず ``NotImplementedError`` になるため、
+    警告は出ない。その場合は例外がそのまま学習を止め、内容がログに残る。
+    """
+
+    _MARKERS = ("fall back to run on the CPU", "not currently supported on the MPS")
+
+    def __init__(self, logger: logging.Logger | None = None) -> None:
+        self.logger = logger or logging.getLogger(LOGGER_NAME)
+        self.events: list[dict[str, str]] = []
+        self._seen: set[str] = set()
+        self._previous: Any = None
+
+    def __enter__(self) -> "MpsFallbackWatcher":
+        self._previous = warnings.showwarning
+        warnings.showwarning = self._show  # type: ignore[assignment]
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        warnings.showwarning = self._previous
+
+    def _show(self, message, category, filename, lineno, file=None, line=None):  # noqa: ANN001
+        text = str(message)
+        if any(marker in text for marker in self._MARKERS):
+            key = text.split("'")[1] if "'" in text else text[:60]
+            if key not in self._seen:
+                self._seen.add(key)
+                # 呼び出し元のうち、このリポジトリのコードだけを残す。
+                stack = [
+                    f"{frame.filename}:{frame.lineno} {frame.name}"
+                    for frame in traceback.extract_stack()[:-1]
+                    if "spkrate" in frame.filename or "scripts" in frame.filename
+                ]
+                location = stack[-1] if stack else f"{filename}:{lineno}"
+                self.events.append({"operator": key, "location": location, "message": text})
+                self.logger.warning(
+                    "MPSのCPUフォールバック: 演算子=%s 発生箇所=%s", key, location
+                )
+        if self._previous is not None:
+            self._previous(message, category, filename, lineno, file, line)
+
+
+# --------------------------------------------------------------------------------------
+# ログ
+
+
+def setup_logger(run_dir: Path, *, name: str = LOGGER_NAME) -> logging.Logger:
+    """``runs/<実験ID>/log.txt`` と標準出力の両方へ書くロガーを作る。
+
+    バックグラウンド実行（CLAUDE.md「学習はバックグラウンドで実行しログをruns/以下に
+    ファイル出力する」）を前提に、ファイル側は行ごとに flush する。
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.propagate = False
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
+    file_handler = logging.FileHandler(run_dir / "log.txt", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    return logger
+
+
+# --------------------------------------------------------------------------------------
+# 設定の記録
+
+
+def _json_safe(value: Any) -> Any:
+    """yaml / json に書ける形へ直す（tuple → list、Path → str など）。
+
+    ``str`` や ``int`` の**派生型**も素の型に直す。``yaml.safe_dump`` は派生型を
+    ``cannot represent an object`` で拒否するためである（``torch.__version__`` は
+    ``str`` を継承した ``torch.torch_version.TorchVersion`` である）。
+    """
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.ndarray):
+        return [_json_safe(item) for item in value.tolist()]
+    if isinstance(value, (np.floating, np.integer, np.bool_)):
+        return _json_safe(value.item())
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return float(value) if math.isfinite(value) else None
+    return value
+
+
+def write_config_snapshot(
+    config: TrainConfig,
+    model_config: CnnConfig,
+    *,
+    run_dir: Path,
+    device: torch.device,
+    extra: dict[str, Any] | None = None,
+) -> Path:
+    """``runs/<実験ID>/config_snapshot.yaml`` を書く（PLAN.md 5-2 の要求）。
+
+    gitのコミットハッシュ、設定ファイルの中身（元のテキストと解決後の値）、モデル構造と
+    その要約、乱数シード、デバイス、ライブラリの版を残す。後からこのファイルだけで
+    実行条件が分かるようにするためである。
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    commit = git_commit_info()
+    model = SpeechRateCNN(model_config)
+
+    snapshot: dict[str, Any] = {
+        "experiment_id": config.experiment_id,
+        "started_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "git": {"commit_hash": commit.commit_hash, "dirty": commit.dirty},
+        "seed": config.seed,
+        "device": str(device),
+        "config_path": config.config_path,
+        "config": _json_safe(config.as_dict()),
+        "train_source": config.train_source,
+        "model_config_path": config.model_config,
+        "model": _json_safe(model_config.as_dict()),
+        "model_summary": _json_safe(model_summary(model)),
+        "environment": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "numpy": np.__version__,
+            "mps_available": bool(torch.backends.mps.is_available()),
+            "pytorch_enable_mps_fallback": os.environ.get(
+                "PYTORCH_ENABLE_MPS_FALLBACK", ""
+            ),
+        },
+    }
+    if config.config_path and Path(config.config_path).is_file():
+        snapshot["config_file_text"] = Path(config.config_path).read_text(encoding="utf-8")
+    if Path(config.model_config).is_file():
+        snapshot["model_config_file_text"] = Path(config.model_config).read_text(
+            encoding="utf-8"
+        )
+    if extra:
+        snapshot.update(_json_safe(extra))
+
+    path = run_dir / "config_snapshot.yaml"
+    path.write_text(
+        yaml.safe_dump(_json_safe(snapshot), allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return path
+
+
+# --------------------------------------------------------------------------------------
+# チェックポイント
+
+
+def save_checkpoint(
+    path: str | Path,
+    model: SpeechRateCNN,
+    *,
+    epoch: int,
+    metrics: dict[str, Any] | None = None,
+    config: TrainConfig | None = None,
+    optimizer: torch.optim.Optimizer | None = None,
+) -> Path:
+    """チェックポイントを保存する。
+
+    重みだけでなくモデル構造の設定も入れる。``load_checkpoint`` はこの設定から
+    モデルを組み直すので、読み込み側が構造を知らなくても復元できる。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "model_state": model.state_dict(),
+        "model_config": _json_safe(model.config.as_dict()),
+        "epoch": int(epoch),
+        "metrics": _json_safe(metrics or {}),
+        "train_config": _json_safe(config.as_dict()) if config is not None else {},
+        "saved_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+    }
+    if optimizer is not None:
+        payload["optimizer_state"] = optimizer.state_dict()
+    torch.save(payload, path)
+    return path
+
+
+def load_checkpoint(
+    path: str | Path, *, map_location: str | torch.device = "cpu"
+) -> tuple[SpeechRateCNN, dict[str, Any]]:
+    """チェックポイントからモデルを組み直して返す。
+
+    Returns:
+        ``(モデル, 保存した中身)``。モデルは ``eval`` 状態ではなく、保存時のまま。
+    """
+    payload = torch.load(Path(path), map_location=map_location, weights_only=False)
+    model = SpeechRateCNN(CnnConfig.from_dict(dict(payload["model_config"])))
+    model.load_state_dict(payload["model_state"])
+    return model, payload
+
+
+# --------------------------------------------------------------------------------------
+# データの組み立て
+
+
+def build_datasets(
+    config: TrainConfig, logger: logging.Logger | None = None
+) -> tuple[Dataset, Dataset, Normalizer]:
+    """設定から学習用・検証用のデータセットを作る（006の1節の2経路）。
+
+    検証は常に拡張なしである。拡張ありで ``features`` 経路を選ぶ組み合わせは、
+    拡張が波形に掛かる以上ありえないので ``ValueError`` で弾く。
+    """
+    log = logger or logging.getLogger(LOGGER_NAME)
+    normalizer = load_normalization(
+        config.data.normalization, mode=config.data.normalization_mode
+    )
+    source = config.train_source
+    if source not in {"features", "waveform"}:
+        raise ValueError(f"data.source は features か waveform: {source}")
+    if config.augment.enabled and source == "features":
+        raise ValueError(
+            "拡張ありでは事前計算特徴量を使えない（docs/decisions/006-augmentation.md 1節: "
+            "拡張は波形に適用する）。data.source を waveform にすること"
+        )
+    if config.data.dev_source != "features":
+        raise ValueError(
+            "検証は事前計算特徴量（data/processed/features/dev）を使う。"
+            f"dev_source={config.data.dev_source} は想定していない"
+        )
+
+    features_dir = Path(config.data.features_dir)
+    if source == "features":
+        from spkrate.data.splits import load_split
+
+        train_dataset: Dataset = FeatureClipDataset(
+            features_dir / "train",
+            client_ids=load_split(config.data.train_split),
+            normalizer=normalizer,
+            limit=config.data.max_train_clips,
+            max_frames=config.data.max_frames,
+        )
+    else:
+        records = select_clip_records(
+            config.data.clips_jsonl,
+            config.data.train_split,
+            limit=config.data.max_train_clips,
+            max_duration_sec=(
+                None
+                if config.data.max_frames is None
+                else config.data.max_frames / 100.0
+            ),
+        )
+        train_dataset = WaveformClipDataset(
+            records,
+            config.data.audio_root,
+            normalizer=normalizer,
+            augment=config.augment.build(),
+            noise_source=_build_noise_source(config, log),
+            seed=config.seed,
+        )
+
+    from spkrate.data.splits import load_split as _load_split
+
+    dev_dataset: Dataset = FeatureClipDataset(
+        features_dir / "dev",
+        client_ids=_load_split(config.data.dev_split),
+        normalizer=normalizer,
+        limit=config.data.max_dev_clips,
+    )
+    log.info(
+        "データ: 学習=%d件（経路=%s、拡張=%s） 検証=%d件（経路=features、拡張なし）",
+        len(train_dataset),  # type: ignore[arg-type]
+        source,
+        "あり" if config.augment.enabled else "なし",
+        len(dev_dataset),  # type: ignore[arg-type]
+    )
+    return train_dataset, dev_dataset, normalizer
+
+
+def _build_noise_source(config: TrainConfig, logger: logging.Logger) -> Any:
+    """MUSAN の noise サブセットを雑音源として用意する（設定にあれば）。"""
+    if not config.augment.enabled or not config.augment.musan_root:
+        return None
+    from spkrate.data.augment import MusanNoiseSource
+
+    source = MusanNoiseSource(config.augment.musan_root)
+    logger.info("雑音源: MUSAN noise %d ファイル", len(source.paths))
+    return source
+
+
+def _frame_counts(dataset: Dataset) -> list[int] | None:
+    counts = getattr(dataset, "frame_counts", None)
+    if counts is None:
+        return None
+    return [int(value) for value in counts]
+
+
+def _make_loader(
+    dataset: Dataset,
+    *,
+    batch_size: int,
+    shuffle: bool,
+    settings: TrainSettings,
+    seed: int,
+) -> DataLoader:
+    """DataLoader を作る。長さでまとめる設定なら専用のバッチ分けを使う。"""
+    counts = _frame_counts(dataset)
+    common: dict[str, Any] = {
+        "collate_fn": collate_clips,
+        "num_workers": settings.num_workers,
+        "pin_memory": False,
+    }
+    if settings.bucketing and counts is not None:
+        sampler = LengthBucketBatchSampler(
+            counts,
+            batch_size,
+            shuffle=shuffle,
+            pool_batches=settings.bucket_pool_batches,
+            seed=seed,
+        )
+        return DataLoader(dataset, batch_sampler=sampler, **common)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, **common)
+
+
+# --------------------------------------------------------------------------------------
+# 学習と検証
+
+
+@dataclass
+class TrainingOutcome:
+    """学習の結果（run_training の戻り値）。"""
+
+    run_dir: Path
+    best_epoch: int
+    best_metric_value: float
+    best_metrics: dict[str, Any]
+    history: list[dict[str, Any]]
+    mps_fallbacks: list[dict[str, str]]
+
+
+def _train_one_epoch(
+    model: SpeechRateCNN,
+    loader: DataLoader,
+    loss_fn: Callable[[Tensor, Tensor], Tensor],
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    *,
+    settings: TrainSettings,
+    epoch: int,
+    logger: logging.Logger,
+) -> dict[str, float]:
+    model.train()
+    total_loss = 0.0
+    total_clips = 0
+    total_abs_error = 0.0
+    started = time.perf_counter()
+    for step, batch in enumerate(loader, start=1):
+        batch = batch.to(device)
+        prediction = model(batch.features, batch.lengths)
+        loss = loss_fn(prediction, batch.moras)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        if settings.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), settings.grad_clip)
+        optimizer.step()
+
+        count = len(batch)
+        total_loss += float(loss.detach().cpu()) * count
+        total_clips += count
+        with torch.no_grad():
+            rate_error = torch.abs(
+                prediction.detach() / batch.durations - batch.moras / batch.durations
+            )
+            total_abs_error += float(rate_error.sum().cpu())
+        if settings.log_interval > 0 and step % settings.log_interval == 0:
+            logger.info(
+                "エポック%d 途中 %dバッチ 損失=%.4f", epoch, step, total_loss / total_clips
+            )
+    if total_clips == 0:
+        raise RuntimeError("学習データが空である")
+    return {
+        "train_loss": total_loss / total_clips,
+        "train_mae_moras_per_sec": total_abs_error / total_clips,
+        "train_seconds": time.perf_counter() - started,
+        "train_clips": total_clips,
+    }
+
+
+@torch.no_grad()
+def evaluate_dev(
+    model: SpeechRateCNN,
+    loader: DataLoader,
+    loss_fn: Callable[[Tensor, Tensor], Tensor],
+    device: torch.device,
+) -> tuple[SpeedRateMetrics, dict[str, float], dict[str, float]]:
+    """検証セットで全指標を計算する。
+
+    モデルの出力はクリップのモーラ数なので、``compute_metrics`` へは
+    「正解モーラ数・推定モーラ数・クリップ長」をそのまま渡す（毎秒モーラ数への換算は
+    ``compute_metrics`` の内部で行われる）。
+
+    Returns:
+        ``(指標, 付随する測定値, クリップIDから推定毎秒モーラ数への辞書)``。
+    """
+    model.eval()
+    true_moras: list[float] = []
+    pred_moras: list[float] = []
+    durations: list[float] = []
+    predictions: dict[str, float] = {}
+    total_loss = 0.0
+    total_clips = 0
+    forward_seconds = 0.0
+
+    for batch in loader:
+        batch = batch.to(device)
+        started = time.perf_counter()
+        prediction = model(batch.features, batch.lengths)
+        if device.type == "mps":
+            torch.mps.synchronize()
+        forward_seconds += time.perf_counter() - started
+        loss = loss_fn(prediction, batch.moras)
+        total_loss += float(loss.detach().cpu()) * len(batch)
+        total_clips += len(batch)
+
+        pred = prediction.detach().cpu().numpy().astype(np.float32)
+        truth = batch.moras.detach().cpu().numpy().astype(np.float32)
+        length = batch.durations.detach().cpu().numpy().astype(np.float32)
+        for clip_id, p, t, d in zip(batch.clip_ids, pred, truth, length, strict=True):
+            pred_moras.append(float(p))
+            true_moras.append(float(t))
+            durations.append(float(d))
+            predictions[clip_id] = float(p) / float(d)
+
+    metrics = compute_metrics(true_moras, pred_moras, durations)
+    extras = {
+        "val_loss": total_loss / total_clips if total_clips else float("nan"),
+        "val_clips": float(total_clips),
+        "val_forward_ms_per_clip": (
+            forward_seconds / total_clips * 1000.0 if total_clips else float("nan")
+        ),
+    }
+    return metrics, extras, predictions
+
+
+def _set_seed(seed: int) -> None:
+    """乱数シードを固定する（設定の ``seed``。config_snapshot.yaml にも残る）。"""
+    random.seed(seed)
+    np.random.seed(seed % (2**32))
+    torch.manual_seed(seed)
+    if torch.backends.mps.is_available():
+        torch.mps.manual_seed(seed)
+
+
+def _is_better(value: float, best: float, mode: str) -> bool:
+    if not math.isfinite(value):
+        return False
+    if not math.isfinite(best):
+        return True
+    return value < best if mode == "min" else value > best
+
+
+def run_training(
+    config: TrainConfig,
+    *,
+    train_dataset: Dataset | None = None,
+    dev_dataset: Dataset | None = None,
+    logger: logging.Logger | None = None,
+) -> TrainingOutcome:
+    """学習を実行する。
+
+    ``train_dataset`` / ``dev_dataset`` を渡すと設定からのデータ構築を省略する
+    （単体テストで合成データを使うための口。本番では ``None`` にして
+    ``build_datasets`` に任せる）。
+
+    出力はすべて ``runs/<実験ID>/`` に置く。エポックごとに検証セットの全指標を計算して
+    ``metrics.jsonl`` に1行追記し、最良のエポックで ``checkpoint_best.pt`` を更新する。
+    """
+    run_dir = config.run_dir
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log = logger or setup_logger(run_dir)
+
+    if config.train.loss not in LOSSES:
+        raise ValueError(f"loss は {LOSSES} のいずれか: {config.train.loss}")
+    _set_seed(config.seed)
+    device = resolve_device(config.device, log)
+    log.info(
+        "実験ID=%s デバイス=%s 損失=%s シード=%d エポック数=%d バッチ=%d",
+        config.experiment_id,
+        device,
+        config.train.loss,
+        config.seed,
+        config.train.epochs,
+        config.train.batch_size,
+    )
+
+    model_config = config.build_model_config()
+    model = SpeechRateCNN(model_config).to(device)
+    summary = model_summary(model)
+    log.info(
+        "モデル: パラメータ数=%d 受容野=%dフレーム(%.2f秒) float32=%.2fMiB",
+        summary["num_parameters"],
+        summary["receptive_field_frames"],
+        summary["receptive_field_seconds"],
+        summary["float32_mib"],
+    )
+
+    if train_dataset is None or dev_dataset is None:
+        built_train, built_dev, _ = build_datasets(config, log)
+        train_dataset = train_dataset or built_train
+        dev_dataset = dev_dataset or built_dev
+
+    train_loader = _make_loader(
+        train_dataset,
+        batch_size=config.train.batch_size,
+        shuffle=True,
+        settings=config.train,
+        seed=config.seed,
+    )
+    dev_loader = _make_loader(
+        dev_dataset,
+        batch_size=config.train.batch_size,
+        shuffle=False,
+        settings=config.train,
+        seed=config.seed,
+    )
+
+    write_config_snapshot(
+        config,
+        model_config,
+        run_dir=run_dir,
+        device=device,
+        extra={
+            "dataset": {
+                "num_train_clips": len(train_dataset),  # type: ignore[arg-type]
+                "num_dev_clips": len(dev_dataset),  # type: ignore[arg-type]
+            }
+        },
+    )
+
+    loss_fn = build_loss(config.train.loss)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config.train.learning_rate,
+        weight_decay=config.train.weight_decay,
+    )
+
+    metrics_path = run_dir / "metrics.jsonl"
+    metrics_path.write_text("", encoding="utf-8")  # 実行ごとに作り直す
+    best_mode = config.train.resolved_best_mode
+    best_value = math.inf if best_mode == "min" else -math.inf
+    best_epoch = -1
+    best_metrics: dict[str, Any] = {}
+    history: list[dict[str, Any]] = []
+
+    with MpsFallbackWatcher(log) as watcher:
+        for epoch in range(1, config.train.epochs + 1):
+            for target in (train_loader.batch_sampler, train_dataset):
+                if hasattr(target, "set_epoch"):
+                    target.set_epoch(epoch)  # type: ignore[union-attr]
+
+            train_stats = _train_one_epoch(
+                model,
+                train_loader,
+                loss_fn,
+                optimizer,
+                device,
+                settings=config.train,
+                epoch=epoch,
+                logger=log,
+            )
+            metrics, extras, predictions = evaluate_dev(model, dev_loader, loss_fn, device)
+
+            row: dict[str, Any] = {
+                "experiment_id": config.experiment_id,
+                "epoch": epoch,
+                "timestamp": datetime.now(timezone.utc)
+                .astimezone()
+                .isoformat(timespec="seconds"),
+                "loss": config.train.loss,
+                "learning_rate": config.train.learning_rate,
+                **{key: _json_safe(value) for key, value in train_stats.items()},
+                **{key: _json_safe(value) for key, value in extras.items()},
+                **_json_safe(metrics.as_dict()),
+            }
+            value = row.get(config.train.best_metric)
+            if value is None:
+                raise ValueError(
+                    f"best_metric が metrics.jsonl の列に無い: {config.train.best_metric}"
+                )
+            is_best = _is_better(float(value), best_value, best_mode)
+            row["is_best"] = is_best
+            with metrics_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            history.append(row)
+
+            log.info(
+                "エポック%d 学習損失=%.4f 検証損失=%.4f 毎秒モーラ数MAE=%.4f 相関=%.4f "
+                "帯別MAE(<4/4-6/6-8/>=8)=%.3f/%.3f/%.3f/%.3f %.1f秒%s",
+                epoch,
+                train_stats["train_loss"],
+                extras["val_loss"],
+                metrics.mae_moras_per_sec,
+                metrics.correlation,
+                metrics.mae_band_under4,
+                metrics.mae_band_4to6,
+                metrics.mae_band_6to8,
+                metrics.mae_band_over8,
+                train_stats["train_seconds"],
+                "（最良）" if is_best else "",
+            )
+
+            save_checkpoint(
+                run_dir / "checkpoint_last.pt",
+                model,
+                epoch=epoch,
+                metrics=row,
+                config=config,
+                optimizer=optimizer,
+            )
+            if is_best:
+                best_value = float(value)
+                best_epoch = epoch
+                best_metrics = row
+                save_checkpoint(
+                    run_dir / "checkpoint_best.pt", model, epoch=epoch, metrics=row, config=config
+                )
+                (run_dir / "predictions_best.json").write_text(
+                    json.dumps(predictions, ensure_ascii=False), encoding="utf-8"
+                )
+
+    if watcher.events:
+        log.warning("MPSのCPUフォールバックが%d種類の演算で発生した", len(watcher.events))
+    else:
+        log.info("MPSのCPUフォールバックは検出されなかった")
+
+    log.info(
+        "学習を終了した。最良エポック=%d %s=%.4f 出力=%s",
+        best_epoch,
+        config.train.best_metric,
+        best_value,
+        run_dir,
+    )
+
+    if config.train.record_metrics_csv and best_metrics:
+        _append_metrics_csv(config, best_metrics, run_dir, log)
+
+    return TrainingOutcome(
+        run_dir=run_dir,
+        best_epoch=best_epoch,
+        best_metric_value=best_value,
+        best_metrics=best_metrics,
+        history=history,
+        mps_fallbacks=watcher.events,
+    )
+
+
+def _append_metrics_csv(
+    config: TrainConfig, best: dict[str, Any], run_dir: Path, logger: logging.Logger
+) -> None:
+    """results/metrics.csv に最良エポックの検証結果を1行追記する。
+
+    ``latency_ms_per_inference`` はここでは**バッチ処理での1クリップあたりの前向き計算
+    時間**であり、docs/spec.md の「1推論あたりの処理時間」（2.0秒窓を1件ずつ推論した値）
+    とは測り方が違う。厳密な値は第5段階5-3の評価で ``spkrate.eval.runner`` から測る。
+    """
+    from spkrate.eval.runner import MetricsRow, append_metrics_row, model_size_bytes
+
+    metrics = SpeedRateMetrics(
+        **{
+            key: best[key]
+            for key in SpeedRateMetrics.__dataclass_fields__
+            if key in best
+        }
+    )
+    append_metrics_row(
+        MetricsRow(
+            experiment_id=config.experiment_id,
+            method="cnn",
+            config_path=config.config_path or config.model_config,
+            split="dev",
+            metrics=metrics,
+            latency_ms_per_inference=float(best.get("val_forward_ms_per_clip", float("nan"))),
+            model_size_bytes=model_size_bytes(run_dir / "checkpoint_best.pt"),
+        ),
+        csv_path=config.train.metrics_csv,
+    )
+    logger.info("results/metrics.csv に追記した: %s", config.train.metrics_csv)
+
+
+# --------------------------------------------------------------------------------------
+# コマンドライン
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="話速推定CNNの学習（docs/PLAN.md 第5段階 5-2）"
+    )
+    parser.add_argument("--config", required=True, help="学習設定のyaml")
+    parser.add_argument("--experiment-id", default=None, help="実験IDを上書きする")
+    parser.add_argument("--epochs", type=int, default=None, help="エポック数を上書きする")
+    parser.add_argument("--device", default=None, help="デバイスを上書きする（mps/cpu）")
+    parser.add_argument("--seed", type=int, default=None, help="乱数シードを上書きする")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_arg_parser().parse_args(argv)
+    config = load_train_config(args.config)
+    if args.experiment_id:
+        config = config.with_changes(experiment_id=args.experiment_id)
+    if args.device:
+        config = config.with_changes(device=args.device)
+    if args.epochs is not None:
+        config = config.with_changes(
+            train=TrainSettings(**{**asdict(config.train), "epochs": args.epochs})
+        )
+    if args.seed is not None:
+        config = config.with_changes(seed=args.seed)
+    run_training(config)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
