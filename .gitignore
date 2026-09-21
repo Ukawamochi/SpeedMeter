@@ -8,3 +8,8 @@ __pycache__/
 /data/*
 !/data/DATASETS.md
 runs/
+
+# results/error_cases/ の音声（第6段階6-1）。Common Voice は再ホスト・再共有が
+# 禁止されており、Public リポジトリにコミットすると再配布になるため追跡しない。
+# 一覧（index.tsv）と README.md はテキストなのでコミットする。
+/results/error_cases/*.mp3
