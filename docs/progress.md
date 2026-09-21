@@ -146,3 +146,10 @@
 - A の6件は英文・ローマ字のアルファベット読み展開（taishouyatteru で+21モーラ、英文で+40モーラ超）、五六匹→ゴジューロッピキの位取り読み、昔し→ムカシシ。学習用の除外は dev に適用されないため残存。
 - 上位100件は全件が過小推定で over8 が75件（dev では6.83%）、9.4超が52件（dev では1.66%）、under4・4to6 は0件。母集団を代表せず、C・B の件数は抽出方法で構造的に押し上がり、A・D の頻度は推定できない。
 - E の37件は6-3の聴取対象。clip_id 一覧を results/error_analysis_text.md 5節と results/error_cases/to_listen.tsv に出した。
+
+### 2026-09-21 第6段階 誤り分析（6-1・6-2完了、6-3で停止）
+- 6-1: scripts/extract_errors.py でdev全件から誤差上位100件を results/error_cases/ に抽出（音声100件・index.tsv・README.md）。誤差は毎秒モーラ数の絶対値で定義。誤差は11.5986〜6.1019 mora/s、100件すべて推定が過小で正解帯はover8 75件・6to8 25件。Common Voiceは再ホスト禁止のため音声は .gitignore の /results/error_cases/*.mp3 で除外しコミットしない。
+- 6-1（併せて実施）: 第4段階4-3が課したD1〜D3診断を src/spkrate/eval/window_diag.py と scripts/window_diagnostics.py で実施。D1分割整合性0.4360 mora/s（閾値B1 0.25を超過）、D2無音窓はデジタル無音0.0824モーラ（B2 1.0未満）だがMUSAN noiseでは4.7024モーラ（超過）、D3連結加法性0.0568 mora/s（B5非該当）。results/window_diagnostics.md。
+- 6-2: 上位100件を排他分類（優先順位 A>D>B>C>E）。Aラベル誤り6件、B極端な長さ30件（全件2.0秒未満）、C分布の端25件（全件上側）、D特殊表記2件、Eテキストから判断不能37件。判定基準はdevの実測分位点から定義。results/error_analysis_text.md。
+- 6-2の所見: 誤差上位抽出は正解値の大きい事例を集めるためBとCは構造的に押し上げられ、下位2帯（under4・4to6）は0件で母集団を代表しない。上位100件の推定毎秒モーラ数の中央値は0.567で63件が1.0未満。
+- 6-3は人間の作業（聴取）のため停止。対象37件の一覧は results/error_cases/to_listen.tsv。
