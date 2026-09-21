@@ -133,3 +133,9 @@
 - 帯別の弱点は2つ。8以上帯の系統的過小評価（誤差1.3824のうち1.2851が偏り、回帰の傾き0.825）と、より重い短入力での悪化（1.8-2.2秒クリップでMAE 0.6881、8以上帯の2.0秒未満では4.0048）。後者は配備単位の2.0秒窓に直結する。
 - 方式Bへ移る条件はB1・B2・B5が判定不能（D1〜D3診断は前向き計算が必要で判断サブエージェントには測れない）、B3・B4は非該当。D1〜D3は第6段階の測定サブエージェントが6-1と同枠で実施する。
 - 同一部分集合5,000件の再集計ではモデルMAE 0.4946・相関0.8996で、包絡0.9059と書き起こし0.2836の差を全帯で62.5〜71.0%詰めた。docs/experiments/003-first-model.md。
+
+### 2026-09-21 第6段階6-1 誤り事例の抽出とD1〜D3診断（完了）
+- scripts/extract_errors.py。dev全29,518件（runs/exp001/predictions_dev_full.json）から毎秒モーラ数の絶対誤差の大きい上位100件を results/error_cases/ へ。誤差は最大11.5986・最小6.1019 mora/s、正解の帯は over8 が75件・6to8 が25件。定義は index.tsv ヘッダと README.md に明記。
+- 音声100件はコピーするが .gitignore に /results/error_cases/*.mp3 を追加してコミットしない（Common Voice は再ホスト・再共有が禁止、Public リポジトリ）。index.tsv と README.md はコミットした。
+- 第4段階4-3が5-4に課したD1〜D3を実施（scripts/window_diagnostics.py、src/spkrate/eval/window_diag.py、mps、CPUフォールバック無し）。D1=0.4360 mora/s（閾値B1 0.25を超過）、D2はデジタル無音0.0824モーラ（B2 1.0を超過しない）・MUSAN noise 4.7024モーラ（超過）、D3=0.0568 mora/s（B5の0.25を超過せず、B5は不成立）。results/window_diagnostics.md。
+- 採否の判断は書いていない（第7段階7-1）。docs/experiments/003-first-model.md 5.2節の更新は未実施で申し送る。pytest 390件全通過（新規15件）。
