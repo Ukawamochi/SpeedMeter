@@ -1,0 +1,70 @@
+# 初回学習（docs/PLAN.md 第5段階 5-3）の設定。
+# 実装: src/spkrate/train/train.py / src/spkrate/train/data.py
+# 方式は docs/decisions/005-window-strategy.md の方式A（クリップ全体入力、全体のモーラ数が正解）。
+#
+# 実行:
+#   PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m spkrate.train.train --config configs/exp001.yaml
+#
+# ## 設定を決めた根拠（5-3の指示により各項目の理由を残す）
+#
+# - モデル構造: configs/model/cnn_base.yaml の既定のまま（498,881パラメータ、受容野69フレーム）。
+#   構造の探索は第7段階の仕事なのでここでは触らない。
+# - 損失 mse: docs/spec.md は二乗誤差とポアソン損失の比較を求めるが、その比較は第7段階7-1の
+#   探索項目である。ここでは片方だけを使う必要があるため、回帰の標準であり評価指標（毎秒モーラ数の
+#   平均絶対誤差）と同じ「誤差の大きさ」を直接下げる二乗誤差を選ぶ。
+# - データ拡張なし: 拡張の有無も第7段階の探索項目であり、初回は拡張なしを対照として取る。
+#   拡張ありは波形から都度メルを計算する経路（docs/decisions/006-augmentation.md 1節）で遅く、
+#   拡張なしなら事前計算済み特徴量（data/processed/features）を memmap で読めて速い。
+# - 学習率 0.0001: 5-2からの申し送り（スモーク実行の3エポック目で検証損失が跳ねた）を受け、
+#   本番前に短い試行を行った。試行は train の先頭20,000件・dev の先頭4,000件・バッチ64・
+#   2〜3エポックで、学習率 3e-3 / 1e-3 / 3e-4 / 1e-4 / 3e-5 を比べた（runs/exp001_lrtrial/）。
+#   3e-3 は検証の相関が負のまま（MAE 2.5）、1e-3 と 3e-4 はエポック間で検証損失が跳ねた。
+#   1e-4 は検証損失が 166 → 96 → 70、相関が 0.31 → 0.50 → 0.58 と単調に改善し最も安定していた。
+#   3e-5 は同じエポック数での進みが最も遅い。よって 1e-4 を採る。
+# - エポック数 6: 事前に1エポックの所要時間を実測した（train 約200クリップ/秒 →
+#   学習1エポック約20分、これに dev 全件29,518件の評価が毎エポック約3分）。
+#   6エポックで全体約2時間半に収まる。学習データは全236,143件を使い、間引きはしない。
+# - バッチ64: 32/64/128/256 で実測したところ処理量はほぼ横ばい（データ供給律速）で、
+#   256は逆に遅かった。1エポックあたりの更新回数（約3,690回）が確保できる64を採る。
+# - num_workers 4: 供給のみの実測で4が最も速く、8では10コアに対して過剰になった。
+# - 乱数シード 20260921: 固定して config と runs/exp001/config_snapshot.yaml に残す。
+# - 最良チェックポイントの選び方: dev 全件の毎秒モーラ数MAE（best_metric）が最小のエポック。
+# - test.json は使わない（第10段階まで禁止）。検証は configs/splits/dev.json のみ。
+
+experiment_id: exp001
+seed: 20260921
+device: mps          # CLAUDE.md「学習デバイスはmps」
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: 第5段階5-3の初回学習。損失=mse、拡張なし、学習率は短い試行で選定（1e-4）
+
+data:
+  source: features       # 拡張なしなので事前計算済み特徴量を読む
+  dev_source: features
+  features_dir: data/processed/features
+  train_split: configs/splits/train.json
+  dev_split: configs/splits/dev.json     # 検証は dev のみ
+  max_train_clips: null  # 全236,143件を使う
+  max_dev_clips: null    # 全29,518件で毎エポック評価する
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+augment:
+  enabled: false     # 拡張の有無の比較は第7段階
+
+train:
+  epochs: 6
+  batch_size: 64
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 4
+  bucketing: true
+  bucket_pool_batches: 20
+  best_metric: mae_moras_per_sec
+  log_interval: 200
+  # results/metrics.csv への追記は学習後の評価（runs/exp001/eval_dev_full.py）で行う。
+  # 学習ループ側の追記は「1推論あたりの処理時間」の測り方が docs/spec.md の2.0秒窓と
+  # 違う（バッチ処理での1クリップあたり）ため使わない。
+  record_metrics_csv: false
