@@ -142,7 +142,10 @@ class DataSettings:
         dev_source: 検証データの経路。既定は ``features``（検証に拡張は掛けない）。
         features_dir: 事前計算特徴量の親ディレクトリ。直下に ``train`` / ``dev`` がある。
         clips_jsonl: クリップ一覧。waveform 経路で使う。
-        audio_root: 音声の親ディレクトリ。``ClipRecord.audio_path`` を解決する。
+        audio_root: ``ClipRecord.audio_path`` を解決する基準ディレクトリ。clips.jsonl の
+            ``audio_path`` はリポジトリ直下からの相対（``data/common_voice_ja/clips/…``）なので、
+            既定はリポジトリ直下（``.``、実行時のカレント）とする。評価側
+            （``build_eval_segments(..., ROOT)``）と同じ解決の仕方。
         train_split / dev_split: 分割ファイル。test.json は渡せない。
         max_train_clips / max_dev_clips: 件数の上限（試走用）。
         max_frames: これを超える長さのクリップを学習から外す（``None`` で無制限）。
@@ -154,7 +157,7 @@ class DataSettings:
     dev_source: str = "features"
     features_dir: str = "data/processed/features"
     clips_jsonl: str = "data/processed/clips.jsonl"
-    audio_root: str = "data/common_voice_ja"
+    audio_root: str = "."
     train_split: str = "configs/splits/train.json"
     dev_split: str = "configs/splits/dev.json"
     max_train_clips: int | None = None
