@@ -1,0 +1,33 @@
+# 雑音下評価セット dev_noisy の定義。
+# 実装: src/spkrate/eval/noisy.py（生成）、scripts/eval_dev_full.py / src/spkrate/eval/runner.py（評価と記録）
+#
+# ## 構成
+# - 対象: configs/splits/dev.json の全件（dev と同じクリップ、同じ正解）。test.json は使わない
+# - 条件: 下の snr_db の3条件。各条件で dev 全件に「固定の残響 → MUSAN noise の重畳」を掛ける
+#   （dev 全件 × 3条件。適用順は拡張 augment_waveform と同じ「残響 → 雑音」で、雑音は残響を受けない）
+# - 雑音の選び方: クリップごとに乱数生成器 numpy.random.default_rng([seed, clip_key]) を作る。
+#   clip_key は clip_id の SHA-256 の先頭8バイトを整数にしたもの（評価順や件数の絞り込みに依存しない）。
+#   この生成器で MUSAN noise（パス順に固定）から1ファイルを一様に選び、切り出し位置を一様に選ぶ
+#   （クリップより短い雑音は繰り返して埋める。spkrate.data.augment.MusanNoiseSource.sample）。
+#   雑音ファイルと切り出し位置は SNR に依存しない（3条件で同じ雑音を使い、SNR だけが異なる）
+# - SNR: 残響後のクリップ全体の実効値に対する雑音の実効値の比（spkrate.data.augment.add_noise）
+# - 残響: 下の reverb の固定値から pyroomacoustics の ShoeBox（鏡像法）で1本だけ作るインパルス応答。
+#   乱数を使わない。最大値の絶対値で1に正規化し、直接音の位置で揃えて元の長さに切る
+#   （spkrate.data.augment.apply_reverb。発話の時刻と長さは変えない）
+# - 保存形式: 波形を評価のたびに決定的に生成する（事前計算した特徴量は保存しない）。
+#   根拠は src/spkrate/eval/noisy.py のモジュール docstring
+seed: 20260924
+snr_db: [5, 10, 15]
+# 相対パスはリポジトリ直下から解決する
+musan_root: data/musan
+musan_subsets: [noise]
+reverb:
+  room_dim_m: [6.0, 4.5, 2.7]
+  # Sabine の式の逆算で壁の吸音率を決めるときの目標残響時間（秒）
+  rt60_sec: 0.5
+  source_pos_m: [2.0, 2.2, 1.5]
+  mic_pos_m: [3.5, 2.6, 1.2]
+  # 鏡像法の最大反射次数。Sabine の逆算が返す次数（74）では生成した応答の実測 RT60 が
+  # 0.71秒と目標より長く、12（学習時の拡張の既定）では0.22秒と短い。30で実測0.51秒
+  # （pyroomacoustics.experimental.measure_rt60、pyroomacoustics 0.10.1）となり目標に合う
+  max_order: 30
