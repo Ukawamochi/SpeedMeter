@@ -1,0 +1,47 @@
+# 早期終了（train.early_stopping_patience）と所要時間の計測の完走確認用の設定。
+# 実装: src/spkrate/train/train.py（モジュール docstring「早期終了と上限エポック数」）
+#
+# これは**本番の学習ではない**。少数クリップで早期終了が働き、終了理由・到達エポック・
+# 最良エポックが log.txt と run_summary.json に、所要時間の内訳が metrics.jsonl に
+# 書かれることだけを確かめる。早く止まるよう最小改善幅を大きめ（0.05）にしている。
+# ここで出る指標に意味は無い。
+#
+# 実行:
+#   PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m spkrate.train.train --config configs/exp000_early_stop_smoke.yaml
+
+experiment_id: exp000_early_stop_smoke
+seed: 20260921
+device: mps          # CLAUDE.md「学習デバイスはmps」
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: 早期終了・計時の完走確認。指標の比較には使わない
+
+data:
+  source: features
+  dev_source: features
+  features_dir: data/processed/features
+  train_split: configs/splits/train.json
+  dev_split: configs/splits/dev.json     # 検証は dev のみ。test.json は使わない
+  max_train_clips: 512
+  max_dev_clips: 256
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+augment:
+  enabled: false
+
+train:
+  max_epochs: 8                   # 上限（通算）。epochs とは同時に書けない
+  early_stopping_patience: 1      # 改善なしが1エポック続いたら終了
+  early_stopping_min_delta: 0.05  # 0.05 mora/s を超えて下がったときだけ改善とみなす
+  batch_size: 16
+  loss: mse
+  learning_rate: 0.001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 2
+  bucketing: true
+  bucket_pool_batches: 20
+  best_metric: mae_moras_per_sec
+  log_interval: 10
+  record_metrics_csv: false  # 完走確認なので results/metrics.csv には残さない

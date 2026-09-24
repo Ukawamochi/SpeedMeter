@@ -45,6 +45,89 @@ CLAUDE.md の規定により学習デバイスは ``mps``、float64 は使わな
 ``log.txt`` に記録する。環境変数 ``PYTORCH_ENABLE_MPS_FALLBACK`` が未設定のときは
 フォールバックせず例外になるので、その場合も例外の内容がログに残る。
 
+## 早期終了と上限エポック数
+
+``train.max_epochs`` は学習の上限エポック数（再開した場合も**通算**のエポック数）である。
+書かなければ従来どおり ``train.epochs`` を上限とする（``epochs`` と ``max_epochs`` を
+両方書くと誤りとして止める）。
+
+``train.early_stopping_patience`` に整数を書くと早期終了が有効になる（既定 ``None`` で無効。
+exp001・exp002 の挙動は変わらない）。監視する指標は ``train.best_metric``（既定は dev の
+``mae_moras_per_sec``）で、``best_mode`` の向き（MAEなら小さいほど良い）に比べる。
+
+**改善の判定**: ``min`` の向きなら「値 < これまでの最良 − ``early_stopping_min_delta``」の
+ときだけ改善とみなす（``max`` なら「値 > 最良 + min_delta」）。``min_delta`` の既定は
+``0.0`` で、このときは厳密に小さくなれば改善である（同値は改善ではない）。改善しなかった
+エポックが ``patience`` 回連続した時点で、そのエポックの記録と保存を済ませてから終了する。
+``checkpoint_best.pt`` の更新は従来どおり厳密な改善で行う（``min_delta=0`` なら両者は一致）。
+
+終了理由は ``early_stopping``（早期終了）か ``max_epochs``（上限到達）で、到達エポック・
+最良エポックとともに ``log.txt`` の最後と ``run_summary.json`` に書く。
+``metrics.jsonl`` の各行にも ``epochs_without_improvement`` を残す。
+
+## チェックポイントからの再開
+
+最上位の ``resume_from`` に再開元のチェックポイント（通常は ``checkpoint_last.pt``）を書く
+（既定 ``None`` で再開しない）。
+
+- ファイルが無ければ誤りとして止める（書き間違いで黙って最初から学習しないため）。
+- ``optimizer_state`` を含むなら、モデルと最適化器（Adam）の状態を読み込み、エポック番号は
+  再開元の ``epoch`` の続きから数える。上限 ``max_epochs`` は通算である。再開元が既に
+  上限に達していれば誤りとして止める。学習率と重み減衰は**設定の値**で上書きし、
+  最適化器の状態に保存された値と違えばその旨をログに書く。スケジューラは使っていないので
+  扱う状態は無い（ログにもそう書く）。
+- ``optimizer_state`` を含まないなら、再開せず最初から（乱数初期化・エポック1から）学習し、
+  その旨と理由をログに書く。
+- モデル構造（チェックポイントの ``model_config`` と今回の構造）と正規化（チェックポイントに
+  保存された平均・標準偏差、無ければ正規化ファイルのパスとモード）が一致しなければ、
+  データの読み込みより前に ``ResumeError`` で止める。
+- 再開元が今回の出力先（``runs/<実験ID>/``）の中にある場合は止める。再開元の
+  ``checkpoint_last.pt`` や ``metrics.jsonl`` を上書きしてしまうためである。
+
+**再開時の最良値（早期終了と ``checkpoint_best.pt`` の基準）は引き継がず、測り直す**。
+再開後の最初のエポックの dev 指標を最初の基準とし、そこから比較を始める。理由:
+
+1. 再開は条件を変えて学習を続けるために使う（exp003/exp004 では学習データに無音サンプル
+   ``silence_samples`` が加わる）。条件の変わった学習の最良は、その条件で学習した
+   エポックの中から選ぶべきである。
+2. 無音サンプルの効果（無音で0を出す）は dev の MAE に現れにくく、加えた直後に dev の MAE が
+   わずかに悪化しうる。再開元の最良値を引き継ぐと、それを一度も下回らないまま
+   ``patience`` で止まり、今回の出力先に ``checkpoint_best.pt`` が一度も書かれない。
+3. dev の件数（``max_dev_clips``）が再開元と違えば値は比べられない。
+
+再開元の最良値（チェックポイントの ``metrics`` にある ``best_metric`` の値）は参考として
+ログと ``run_summary.json`` に残すが、比較には使わない。改善なしの連続回数も0から数える。
+
+**乱数の扱い**: 再開時も ``seed`` で乱数を初期化し直す（大域の乱数状態はチェックポイントに
+保存していない）。バッチの並び（``LengthBucketBatchSampler``）、拡張、無音サンプルの中身は
+``(seed, エポック番号, 件の番号)`` から作るので、エポック番号を続きから数えれば、
+続けて学習した場合と同じ系列になる。大域の乱数はモデルの初期化（再開では読み込んだ
+重みで上書き）と DataLoader のワーカーの種にしか使っておらず、学習データの乱数には
+効かない。ただし MPS の計算の非決定性などにより、ビット単位での一致は保証しない。
+
+## 所要時間とデータ読み込み律速の計測
+
+エポックごとに次を ``metrics.jsonl`` と ``log.txt`` に書く（単位は秒）。
+
+| 列 | 中身 |
+| --- | --- |
+| ``epoch_seconds`` | エポック全体（学習ループ＋dev評価。チェックポイントの保存は含まない） |
+| ``train_seconds`` | 学習ループ全体（従来からある列） |
+| ``train_step_seconds`` | 学習ステップの計算（デバイスへの転送・順伝播・逆伝播・更新。mps は同期してから止める）の合計 |
+| ``data_wait_seconds`` | DataLoader から次のバッチを取り出すまでの待ち時間の合計（ワーカーの起動を含む） |
+| ``data_wait_ratio`` | ``data_wait_seconds / train_seconds`` |
+| ``loader_end_seconds`` | 最後のバッチの後、ループを抜けるまで（DataLoader の終端処理とワーカーの終了待ち）。``train_seconds`` は計算・待ち・これの和 |
+| ``dev_eval_seconds`` | dev 評価の所要時間 |
+
+``data_wait_ratio`` が ``DATA_BOUND_RATIO``（0.5）以上なら、学習ループの半分以上を
+データ待ちに使っているので「データ読み込み律速」とログに書く。ワーカーが計算に
+追いついていれば待ち時間はほぼ0になる。
+
+``loader_end_seconds`` は比率の分子に含めない（次のバッチを待つ時間ではないため）。
+macOS（spawn）で ``num_workers>0`` のとき、ワーカーが終了要求にすぐ応じず、PyTorch の
+終了待ちの上限（ワーカー1つあたり約5秒）まで待つことがある。これが大きい場合は
+データ読み込みの律速とは別の固定費として読む。
+
 ## テストセット
 
 検証には ``configs/splits/dev.json`` のみを使う。``configs/splits/test.json`` は
@@ -112,8 +195,10 @@ from spkrate.train.silence import (
 __all__ = [
     "AugmentSettings",
     "DataSettings",
+    "DATA_BOUND_RATIO",
     "LOSSES",
     "POISSON_EPS",
+    "ResumeError",
     "MpsFallbackWatcher",
     "TrainConfig",
     "TrainSettings",
@@ -136,6 +221,17 @@ LOSSES: tuple[str, ...] = ("mse", "poisson")
 POISSON_EPS = 1e-8
 
 LOGGER_NAME = "spkrate.train"
+
+# データ待ちの比率がこれ以上なら「データ読み込み律速」とログに書く。
+# docstring「所要時間とデータ読み込み律速の計測」を参照。
+DATA_BOUND_RATIO = 0.5
+
+STOP_EARLY = "early_stopping"
+STOP_MAX_EPOCHS = "max_epochs"
+
+
+class ResumeError(ValueError):
+    """再開元のチェックポイントが今回の設定と合わない（構造・正規化の不一致など）。"""
 
 
 # --------------------------------------------------------------------------------------
@@ -218,7 +314,12 @@ class TrainSettings:
     """最適化と実行の設定。
 
     Attributes:
-        epochs: エポック数。
+        epochs: エポック数。``max_epochs`` を書かないときの上限。
+        max_epochs: 上限エポック数（再開時は通算）。``None`` なら ``epochs`` を使う。
+            ``epochs`` と同時には書けない。
+        early_stopping_patience: 改善しないエポックがこの回数続いたら終了する。
+            ``None`` で早期終了しない（既定）。
+        early_stopping_min_delta: 改善とみなす最小の幅（0以上）。既定0で厳密な改善。
         batch_size: バッチの件数。
         loss: ``mse`` か ``poisson``（docs/spec.md「損失」）。
         learning_rate / weight_decay: Adam の設定。
@@ -234,6 +335,9 @@ class TrainSettings:
     """
 
     epochs: int = 10
+    max_epochs: int | None = None
+    early_stopping_patience: int | None = None
+    early_stopping_min_delta: float = 0.0
     batch_size: int = 16
     loss: str = "mse"
     learning_rate: float = 1e-3
@@ -250,7 +354,31 @@ class TrainSettings:
 
     @classmethod
     def from_mapping(cls, mapping: dict[str, Any] | None) -> "TrainSettings":
-        return cls(**_reject_unknown(cls, mapping or {}))
+        payload = _reject_unknown(cls, mapping or {})
+        if "epochs" in payload and payload.get("max_epochs") is not None:
+            raise ValueError(
+                "train.epochs と train.max_epochs は同時に書けない（上限はどちらか一方で書く）"
+            )
+        settings = cls(**payload)
+        settings.validate()
+        return settings
+
+    def validate(self) -> None:
+        if self.resolved_max_epochs < 1:
+            raise ValueError(f"上限エポック数は1以上: {self.resolved_max_epochs}")
+        if self.early_stopping_patience is not None and self.early_stopping_patience < 1:
+            raise ValueError(
+                f"early_stopping_patience は1以上か null: {self.early_stopping_patience}"
+            )
+        if not (self.early_stopping_min_delta >= 0.0):
+            raise ValueError(
+                f"early_stopping_min_delta は0以上: {self.early_stopping_min_delta}"
+            )
+
+    @property
+    def resolved_max_epochs(self) -> int:
+        """上限エポック数（通算）。"""
+        return int(self.max_epochs if self.max_epochs is not None else self.epochs)
 
     @property
     def resolved_best_mode(self) -> str:
@@ -278,6 +406,8 @@ class TrainConfig:
     # 正解モーラ数0の無音・雑音サンプルの追加（spkrate.train.silence、docs/spec.md「学習データ」）。
     # 拡張とは独立に有効化できる。
     silence_samples: SilenceSettings = field(default_factory=SilenceSettings)
+    # 再開元のチェックポイント（モジュール docstring「チェックポイントからの再開」）。
+    resume_from: str | None = None
     notes: str = ""
     config_path: str = ""
 
@@ -589,11 +719,13 @@ def save_checkpoint(
     metrics: dict[str, Any] | None = None,
     config: TrainConfig | None = None,
     optimizer: torch.optim.Optimizer | None = None,
+    normalizer: Normalizer | None = None,
 ) -> Path:
     """チェックポイントを保存する。
 
     重みだけでなくモデル構造の設定も入れる。``load_checkpoint`` はこの設定から
     モデルを組み直すので、読み込み側が構造を知らなくても復元できる。
+    ``normalizer`` を渡すと正規化の平均・標準偏差も入れる（再開時の一致の検査に使う）。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -607,6 +739,12 @@ def save_checkpoint(
     }
     if optimizer is not None:
         payload["optimizer_state"] = optimizer.state_dict()
+    if normalizer is not None:
+        payload["normalization"] = {
+            "mode": normalizer.mode,
+            "mean": np.ravel(normalizer.mean).astype(float).tolist(),
+            "std": np.ravel(normalizer.std).astype(float).tolist(),
+        }
     torch.save(payload, path)
     return path
 
@@ -860,6 +998,11 @@ class TrainingOutcome:
     best_metrics: dict[str, Any]
     history: list[dict[str, Any]]
     mps_fallbacks: list[dict[str, str]]
+    # 終了理由（``early_stopping`` か ``max_epochs``）、到達エポック（通算）、開始エポック。
+    stop_reason: str = STOP_MAX_EPOCHS
+    last_epoch: int = 0
+    start_epoch: int = 1
+    resume: dict[str, Any] = field(default_factory=dict)
 
 
 def describe_epoch_augment_counts(
@@ -895,8 +1038,14 @@ def _train_one_epoch(
     total_abs_error = 0.0
     augment_counts: dict[str, int] = {}
     silence_clips = 0
+    data_wait_seconds = 0.0
+    step_seconds = 0.0
     started = time.perf_counter()
+    # 次のバッチを取り出し始めた時刻。最初の取り出しにはワーカーの起動も含まれる。
+    fetch_started = started
     for step, batch in enumerate(loader, start=1):
+        step_started = time.perf_counter()
+        data_wait_seconds += step_started - fetch_started
         silence_clips += sum(1 for clip_id in batch.clip_ids if is_silence_clip(clip_id))
         for names in getattr(batch, "augment_applied", ()):
             for name in names:
@@ -909,6 +1058,7 @@ def _train_one_epoch(
         if settings.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), settings.grad_clip)
         optimizer.step()
+        _synchronize(device)
 
         count = len(batch)
         total_loss += float(loss.detach().cpu()) * count
@@ -922,12 +1072,22 @@ def _train_one_epoch(
             logger.info(
                 "エポック%d 途中 %dバッチ 損失=%.4f", epoch, step, total_loss / total_clips
             )
+        fetch_started = time.perf_counter()
+        step_seconds += fetch_started - step_started
+    # 最後のバッチの後、ループを抜けるまで（DataLoader の終端とワーカーの終了待ち）。
+    loader_end_seconds = time.perf_counter() - fetch_started
     if total_clips == 0:
         raise RuntimeError("学習データが空である")
+    train_seconds = time.perf_counter() - started
     return {
         "train_loss": total_loss / total_clips,
         "train_mae_moras_per_sec": total_abs_error / total_clips,
-        "train_seconds": time.perf_counter() - started,
+        "train_seconds": train_seconds,
+        # 所要時間の内訳（モジュール docstring「所要時間とデータ読み込み律速の計測」）。
+        "train_step_seconds": step_seconds,
+        "data_wait_seconds": data_wait_seconds,
+        "data_wait_ratio": data_wait_seconds / train_seconds if train_seconds > 0 else 0.0,
+        "loader_end_seconds": loader_end_seconds,
         "train_clips": total_clips,
         # うち無音サンプル（spkrate.train.silence）の件数。拡張は掛けないので、
         # 拡張の実適用率の分母からは除く。
@@ -993,6 +1153,14 @@ def evaluate_dev(
     return metrics, extras, predictions
 
 
+def _synchronize(device: torch.device) -> None:
+    """非同期のデバイスで計算の完了を待つ（計時を正しくするため）。"""
+    if device.type == "mps":
+        torch.mps.synchronize()
+    elif device.type == "cuda":
+        torch.cuda.synchronize()
+
+
 def _set_seed(seed: int) -> None:
     """乱数シードを固定する（設定の ``seed``。config_snapshot.yaml にも残る）。"""
     random.seed(seed)
@@ -1002,12 +1170,164 @@ def _set_seed(seed: int) -> None:
         torch.mps.manual_seed(seed)
 
 
-def _is_better(value: float, best: float, mode: str) -> bool:
+def _is_better(value: float, best: float, mode: str, min_delta: float = 0.0) -> bool:
+    """``value`` が ``best`` より ``min_delta`` を超えて良いか（早期終了の改善の判定）。"""
     if not math.isfinite(value):
         return False
     if not math.isfinite(best):
         return True
-    return value < best if mode == "min" else value > best
+    if mode == "min":
+        return value < best - min_delta
+    return value > best + min_delta
+
+
+def _normalization_mismatch(
+    payload: dict[str, Any], config: TrainConfig, current: Normalizer | None
+) -> str | None:
+    """再開元と今回の正規化が違えば、その説明を返す。一致すれば ``None``。"""
+    saved = payload.get("normalization")
+    if saved is not None and current is not None:
+        if saved.get("mode") != current.mode:
+            return f"正規化のモードが違う（再開元={saved.get('mode')} 今回={current.mode}）"
+        mean = np.asarray(saved.get("mean", []), dtype=np.float32)
+        std = np.asarray(saved.get("std", []), dtype=np.float32)
+        if mean.shape != np.ravel(current.mean).shape or not (
+            np.allclose(mean, np.ravel(current.mean)) and np.allclose(std, np.ravel(current.std))
+        ):
+            return "正規化の平均・標準偏差の値が違う"
+        return None
+    # 値が保存されていない古いチェックポイント（exp001・exp002）はパスとモードで比べる。
+    data = dict(payload.get("train_config", {}).get("data", {}) or {})
+    if not data:
+        return "再開元に正規化の情報（値も設定も）が無く、一致を確かめられない"
+    saved_path = data.get("normalization")
+    if saved_path is None or Path(saved_path) != Path(config.data.normalization):
+        return (
+            f"正規化ファイルが違う（再開元={saved_path} 今回={config.data.normalization}）"
+        )
+    saved_mode = data.get("normalization_mode")
+    current_mode = current.mode if current is not None else config.data.normalization_mode
+    if saved_mode is not None and current_mode is not None and saved_mode != current_mode:
+        return f"正規化のモードが違う（再開元={saved_mode} 今回={current_mode}）"
+    return None
+
+
+@dataclass
+class ResumeState:
+    """再開の判断の結果。``resumed`` が偽なら最初から学習する。"""
+
+    source: str | None = None
+    resumed: bool = False
+    source_epoch: int = 0
+    reason: str = ""
+    source_best_value: float | None = None
+    payload: dict[str, Any] | None = None
+
+    @property
+    def start_epoch(self) -> int:
+        return self.source_epoch + 1 if self.resumed else 1
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "resume_from": self.source,
+            "resumed": self.resumed,
+            "source_epoch": self.source_epoch if self.resumed else None,
+            "start_epoch": self.start_epoch,
+            "reason": self.reason,
+            "source_best_metric_value": self.source_best_value,
+            "best_value_policy": "remeasure" if self.resumed else None,
+        }
+
+
+def prepare_resume(
+    config: TrainConfig,
+    model_config: CnnConfig,
+    normalizer: Normalizer | None,
+    logger: logging.Logger,
+) -> ResumeState:
+    """再開元のチェックポイントを検査し、再開するかを決める（データの読み込みより前）。
+
+    モジュール docstring「チェックポイントからの再開」を参照。
+    """
+    if not config.resume_from:
+        return ResumeState(reason="resume_from が未設定のため最初から学習する")
+    path = Path(config.resume_from)
+    if not path.is_file():
+        raise ResumeError(f"再開元のチェックポイントが無い: {path}")
+    run_dir = config.run_dir.resolve()
+    if run_dir == path.resolve().parent or run_dir in path.resolve().parents:
+        raise ResumeError(
+            f"再開元 {path} が今回の出力先 {config.run_dir} の中にある。再開元の記録を"
+            "上書きしてしまうため、別の experiment_id で再開すること"
+        )
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if "optimizer_state" not in payload:
+        state = ResumeState(
+            source=str(path),
+            reason=f"{path} に optimizer_state が無いため再開せず、最初から学習する",
+        )
+        logger.warning("再開: %s", state.reason)
+        return state
+
+    saved_model = _json_safe(dict(payload.get("model_config", {})))
+    current_model = _json_safe(model_config.as_dict())
+    if saved_model != current_model:
+        diff = sorted(
+            key
+            for key in set(saved_model) | set(current_model)
+            if saved_model.get(key) != current_model.get(key)
+        )
+        raise ResumeError(f"再開元とモデル構造が違う（違う項目: {diff}）: {path}")
+    mismatch = _normalization_mismatch(payload, config, normalizer)
+    if mismatch:
+        raise ResumeError(f"再開元と正規化が違う: {mismatch}: {path}")
+
+    source_epoch = int(payload.get("epoch", 0))
+    max_epochs = config.train.resolved_max_epochs
+    if source_epoch >= max_epochs:
+        raise ResumeError(
+            f"再開元は既にエポック{source_epoch}まで学習済みで、上限（通算）"
+            f"{max_epochs} に達している: {path}"
+        )
+    source_value = dict(payload.get("metrics", {}) or {}).get(config.train.best_metric)
+    return ResumeState(
+        source=str(path),
+        resumed=True,
+        source_epoch=source_epoch,
+        reason=f"{path} に optimizer_state があるため、モデルと最適化器の状態を読み込んで再開する",
+        source_best_value=None if source_value is None else float(source_value),
+        payload=payload,
+    )
+
+
+def _load_optimizer_state(
+    optimizer: torch.optim.Optimizer,
+    state: dict[str, Any],
+    settings: TrainSettings,
+    logger: logging.Logger,
+) -> None:
+    """最適化器の状態を読み込み、学習率と重み減衰は設定の値で上書きする。"""
+    optimizer.load_state_dict(state)
+    for group in optimizer.param_groups:
+        for key, value in (
+            ("lr", settings.learning_rate),
+            ("weight_decay", settings.weight_decay),
+        ):
+            if not math.isclose(float(group.get(key, value)), float(value)):
+                logger.warning(
+                    "再開: 最適化器の状態の %s=%g を設定の値 %g で上書きする",
+                    key,
+                    float(group[key]),
+                    float(value),
+                )
+            group[key] = value
+
+
+def _try_load_normalizer(config: TrainConfig) -> Normalizer | None:
+    path = Path(config.data.normalization)
+    if not path.is_file():
+        return None
+    return load_normalization(path, mode=config.data.normalization_mode)
 
 
 def run_training(
@@ -1055,20 +1375,73 @@ def run_training(
 
     if config.train.loss not in LOSSES:
         raise ValueError(f"loss は {LOSSES} のいずれか: {config.train.loss}")
+    config.train.validate()
+    max_epochs = config.train.resolved_max_epochs
+    patience = config.train.early_stopping_patience
+    min_delta = float(config.train.early_stopping_min_delta)
+    best_mode = config.train.resolved_best_mode
     _set_seed(config.seed)
     device = resolve_device(config.device, log)
     log.info(
-        "実験ID=%s デバイス=%s 損失=%s シード=%d エポック数=%d バッチ=%d",
+        "実験ID=%s デバイス=%s 損失=%s シード=%d 上限エポック数（通算）=%d バッチ=%d",
         config.experiment_id,
         device,
         config.train.loss,
         config.seed,
-        config.train.epochs,
+        max_epochs,
         config.train.batch_size,
     )
+    if patience is None:
+        log.info("早期終了: なし（上限エポック数まで学習する）")
+    else:
+        log.info(
+            "早期終了: あり 監視=%s（%s） patience=%d 最小改善幅=%g"
+            "（%sのとき改善とみなす）",
+            config.train.best_metric,
+            "小さいほど良い" if best_mode == "min" else "大きいほど良い",
+            patience,
+            min_delta,
+            "値 < 最良 − 最小改善幅" if best_mode == "min" else "値 > 最良 + 最小改善幅",
+        )
 
     model_config = config.build_model_config()
+    normalizer = _try_load_normalizer(config)
+    # 再開元の検査（構造・正規化の不一致）はデータの読み込みより前に行う。
+    try:
+        resume = prepare_resume(config, model_config, normalizer, log)
+    except ResumeError as error:
+        log.error("再開元のチェックポイントの誤りで停止する: %s", error)
+        raise
     model = SpeechRateCNN(model_config).to(device)
+    if resume.resumed:
+        assert resume.payload is not None
+        model.load_state_dict(resume.payload["model_state"])
+        log.info(
+            "再開: 再開元=%s 再開元のエポック=%d → エポック%dから通算%dまで学習する。理由: %s",
+            resume.source,
+            resume.source_epoch,
+            resume.start_epoch,
+            max_epochs,
+            resume.reason,
+        )
+        log.info(
+            "再開: 最良値は引き継がず測り直す（再開後の最初のエポックの dev 指標を最初の基準に"
+            "する）。再開元の %s=%s は参考値で、比較には使わない。理由: 再開後は学習の条件"
+            "（無音サンプルの追加など）が変わるため、その条件で学習したエポックの中から最良を"
+            "選ぶ。引き継ぐと条件変更直後の一時的な悪化で checkpoint_best.pt が一度も書かれない"
+            "まま早期終了しうる。dev の件数が再開元と違う場合も値を比べられない",
+            config.train.best_metric,
+            "不明" if resume.source_best_value is None else f"{resume.source_best_value:.4f}",
+        )
+        log.info(
+            "再開: 乱数は seed=%d で初期化し直す（大域の乱数状態は保存していない）。"
+            "バッチの並び・拡張・無音サンプルは (seed, エポック番号, 件の番号) から作るので、"
+            "エポック番号を続きから数えることで続けて学習した場合と同じ系列になる",
+            config.seed,
+        )
+        log.info("再開: 学習率スケジューラは使っていないため、読み込む状態は無い")
+    elif config.resume_from:
+        log.info("再開: 再開元=%s 理由: %s（エポック1から）", resume.source, resume.reason)
     summary = model_summary(model)
     log.info(
         "モデル: パラメータ数=%d 受容野=%dフレーム(%.2f秒) float32=%.2fMiB",
@@ -1109,7 +1482,8 @@ def run_training(
                 "num_dev_clips": len(dev_dataset),  # type: ignore[arg-type]
                 # 無音サンプルの件数（num_train_clips に含まれる）。無効なら null。
                 "silence_counts": getattr(train_dataset, "silence_counts", None),
-            }
+            },
+            "resume": resume.as_dict(),
         },
     )
 
@@ -1119,17 +1493,26 @@ def run_training(
         lr=config.train.learning_rate,
         weight_decay=config.train.weight_decay,
     )
+    if resume.resumed:
+        assert resume.payload is not None
+        _load_optimizer_state(optimizer, resume.payload["optimizer_state"], config.train, log)
+        resume.payload = None  # 大きな重みを持ち続けない
 
     metrics_path = run_dir / "metrics.jsonl"
     metrics_path.write_text("", encoding="utf-8")  # 実行ごとに作り直す
-    best_mode = config.train.resolved_best_mode
     best_value = math.inf if best_mode == "min" else -math.inf
     best_epoch = -1
     best_metrics: dict[str, Any] = {}
     history: list[dict[str, Any]] = []
+    # 早期終了の基準（再開時も測り直す。docstring「チェックポイントからの再開」）。
+    stop_best = math.inf if best_mode == "min" else -math.inf
+    epochs_without_improvement = 0
+    stop_reason = STOP_MAX_EPOCHS
+    last_epoch = resume.start_epoch - 1
 
     with MpsFallbackWatcher(log) as watcher:
-        for epoch in range(1, config.train.epochs + 1):
+        for epoch in range(resume.start_epoch, max_epochs + 1):
+            epoch_started = time.perf_counter()
             for target in (train_loader.batch_sampler, train_dataset):
                 if hasattr(target, "set_epoch"):
                     target.set_epoch(epoch)  # type: ignore[union-attr]
@@ -1155,7 +1538,10 @@ def run_training(
                         - int(train_stats["train_silence_clips"]),
                     ),
                 )
+            dev_started = time.perf_counter()
             metrics, extras, predictions = evaluate_dev(model, dev_loader, loss_fn, device)
+            dev_eval_seconds = time.perf_counter() - dev_started
+            epoch_seconds = time.perf_counter() - epoch_started
 
             row: dict[str, Any] = {
                 "experiment_id": config.experiment_id,
@@ -1168,6 +1554,8 @@ def run_training(
                 **{key: _json_safe(value) for key, value in train_stats.items()},
                 **{key: _json_safe(value) for key, value in extras.items()},
                 **_json_safe(metrics.as_dict()),
+                "dev_eval_seconds": dev_eval_seconds,
+                "epoch_seconds": epoch_seconds,
             }
             value = row.get(config.train.best_metric)
             if value is None:
@@ -1176,6 +1564,12 @@ def run_training(
                 )
             is_best = _is_better(float(value), best_value, best_mode)
             row["is_best"] = is_best
+            if _is_better(float(value), stop_best, best_mode, min_delta):
+                stop_best = float(value)
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            row["epochs_without_improvement"] = epochs_without_improvement
             with metrics_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             history.append(row)
@@ -1195,6 +1589,22 @@ def run_training(
                 train_stats["train_seconds"],
                 "（最良）" if is_best else "",
             )
+            wait_ratio = float(train_stats["data_wait_ratio"])
+            log.info(
+                "エポック%d 所要時間: 全体=%.1f秒 学習ループ=%.1f秒（計算=%.1f秒 "
+                "データ待ち=%.1f秒 比率=%.3f 終端処理=%.1f秒） dev評価=%.1f秒 → %s",
+                epoch,
+                epoch_seconds,
+                train_stats["train_seconds"],
+                train_stats["train_step_seconds"],
+                train_stats["data_wait_seconds"],
+                wait_ratio,
+                train_stats["loader_end_seconds"],
+                dev_eval_seconds,
+                "データ読み込み律速"
+                if wait_ratio >= DATA_BOUND_RATIO
+                else "データ読み込み律速ではない",
+            )
 
             save_checkpoint(
                 run_dir / "checkpoint_last.pt",
@@ -1203,25 +1613,66 @@ def run_training(
                 metrics=row,
                 config=config,
                 optimizer=optimizer,
+                normalizer=normalizer,
             )
             if is_best:
                 best_value = float(value)
                 best_epoch = epoch
                 best_metrics = row
                 save_checkpoint(
-                    run_dir / "checkpoint_best.pt", model, epoch=epoch, metrics=row, config=config
+                    run_dir / "checkpoint_best.pt",
+                    model,
+                    epoch=epoch,
+                    metrics=row,
+                    config=config,
+                    normalizer=normalizer,
                 )
                 (run_dir / "predictions_best.json").write_text(
                     json.dumps(predictions, ensure_ascii=False), encoding="utf-8"
                 )
+            last_epoch = epoch
+            if patience is not None and epochs_without_improvement >= patience:
+                stop_reason = STOP_EARLY
+                log.info(
+                    "早期終了: %s が %dエポック連続で改善しなかった（エポック%dで終了）",
+                    config.train.best_metric,
+                    epochs_without_improvement,
+                    epoch,
+                )
+                break
 
     if watcher.events:
         log.warning("MPSのCPUフォールバックが%d種類の演算で発生した", len(watcher.events))
     else:
         log.info("MPSのCPUフォールバックは検出されなかった")
 
+    summary_payload = {
+        "experiment_id": config.experiment_id,
+        "stop_reason": stop_reason,
+        "last_epoch": last_epoch,
+        "start_epoch": resume.start_epoch,
+        "epochs_this_run": len(history),
+        "max_epochs": max_epochs,
+        "early_stopping_patience": patience,
+        "early_stopping_min_delta": min_delta,
+        "best_metric": config.train.best_metric,
+        "best_mode": best_mode,
+        "best_epoch": best_epoch,
+        "best_metric_value": best_value,
+        "epochs_without_improvement": epochs_without_improvement,
+        "resume": resume.as_dict(),
+        "total_epoch_seconds": sum(float(row["epoch_seconds"]) for row in history),
+        "finished_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+    }
+    (run_dir / "run_summary.json").write_text(
+        json.dumps(_json_safe(summary_payload), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     log.info(
-        "学習を終了した。最良エポック=%d %s=%.4f 出力=%s",
+        "学習を終了した。終了理由=%s 到達エポック=%d（通算、上限%d） 最良エポック=%d %s=%.4f 出力=%s",
+        "早期終了" if stop_reason == STOP_EARLY else "上限到達",
+        last_epoch,
+        max_epochs,
         best_epoch,
         config.train.best_metric,
         best_value,
@@ -1238,6 +1689,10 @@ def run_training(
         best_metrics=best_metrics,
         history=history,
         mps_fallbacks=watcher.events,
+        stop_reason=stop_reason,
+        last_epoch=last_epoch,
+        start_epoch=resume.start_epoch,
+        resume=resume.as_dict(),
     )
 
 
@@ -1284,7 +1739,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", required=True, help="学習設定のyaml")
     parser.add_argument("--experiment-id", default=None, help="実験IDを上書きする")
-    parser.add_argument("--epochs", type=int, default=None, help="エポック数を上書きする")
+    parser.add_argument(
+        "--epochs", type=int, default=None, help="上限エポック数（通算）を上書きする"
+    )
     parser.add_argument("--device", default=None, help="デバイスを上書きする（mps/cpu）")
     parser.add_argument("--seed", type=int, default=None, help="乱数シードを上書きする")
     return parser
@@ -1298,8 +1755,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.device:
         config = config.with_changes(device=args.device)
     if args.epochs is not None:
+        # 上限を max_epochs で書いた設定では max_epochs を上書きする。
+        key = "max_epochs" if config.train.max_epochs is not None else "epochs"
         config = config.with_changes(
-            train=TrainSettings(**{**asdict(config.train), "epochs": args.epochs})
+            train=TrainSettings(**{**asdict(config.train), key: args.epochs})
         )
     if args.seed is not None:
         config = config.with_changes(seed=args.seed)
