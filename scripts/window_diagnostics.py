@@ -92,6 +92,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--d2-windows", type=int, default=D2_WINDOWS)
     parser.add_argument("--d3-pairs", type=int, default=D3_PAIRS)
     parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--experiment-id", default=EXPERIMENT_ID)
+    parser.add_argument("--output-json", default=OUTPUT_JSON)
+    parser.add_argument("--output-md", default=OUTPUT_MD)
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
@@ -114,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     rng = np.random.default_rng(args.seed)
     summary: dict[str, object] = {
         "checkpoint": args.checkpoint,
-        "experiment_id": EXPERIMENT_ID,
+        "experiment_id": args.experiment_id,
         "best_epoch": int(payload["epoch"]),
         "device": str(device),
         "seed": int(args.seed),
@@ -233,13 +236,14 @@ def main(argv: list[str] | None = None) -> int:
         log(f"D3: mean={summary['D3']['abs_error_mora_per_sec']['mean']:.4f} mora/s")
 
     summary["mps_cpu_fallback_events"] = watcher.events
+    summary["output_json"] = args.output_json
     log(f"MPSのCPUフォールバック: {len(watcher.events)} 件")
 
-    Path(OUTPUT_JSON).write_text(
+    Path(args.output_json).write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    Path(OUTPUT_MD).write_text(render_markdown(summary), encoding="utf-8")
-    log(f"書き出し: {OUTPUT_JSON} / {OUTPUT_MD}")
+    Path(args.output_md).write_text(render_markdown(summary), encoding="utf-8")
+    log(f"書き出し: {args.output_json} / {args.output_md}")
     log("DIAGNOSTICS_DONE")
     return 0
 
@@ -350,7 +354,7 @@ dev から2件ずつ組にして 0.2秒の無音を挟んで連結し、`P(AB)` 
 
 - デバイス `{s['device']}`。float64 は使っていない。`torch.compile` は使っていない
 - MPS未対応演算によるCPUフォールバック: {fallback}
-- 生の値は `results/window_diagnostics.json` にある
+- 生の値は `{s['output_json']}` にある
 """
 
 
