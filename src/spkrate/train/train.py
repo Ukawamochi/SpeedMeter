@@ -116,11 +116,17 @@ exp001・exp002 の挙動は変わらない）。監視する指標は ``train.b
 | ``train_step_seconds`` | 学習ステップの計算（デバイスへの転送・順伝播・逆伝播・更新。mps は同期してから止める）の合計 |
 | ``data_wait_seconds`` | DataLoader から次のバッチを取り出すまでの待ち時間の合計（ワーカーの起動を含む） |
 | ``data_wait_ratio`` | ``data_wait_seconds / train_seconds`` |
+| ``loader_end_seconds`` | 最後のバッチの後、ループを抜けるまで（DataLoader の終端処理とワーカーの終了待ち）。``train_seconds`` は計算・待ち・これの和 |
 | ``dev_eval_seconds`` | dev 評価の所要時間 |
 
 ``data_wait_ratio`` が ``DATA_BOUND_RATIO``（0.5）以上なら、学習ループの半分以上を
 データ待ちに使っているので「データ読み込み律速」とログに書く。ワーカーが計算に
 追いついていれば待ち時間はほぼ0になる。
+
+``loader_end_seconds`` は比率の分子に含めない（次のバッチを待つ時間ではないため）。
+macOS（spawn）で ``num_workers>0`` のとき、ワーカーが終了要求にすぐ応じず、PyTorch の
+終了待ちの上限（ワーカー1つあたり約5秒）まで待つことがある。これが大きい場合は
+データ読み込みの律速とは別の固定費として読む。
 
 ## テストセット
 
@@ -1068,6 +1074,8 @@ def _train_one_epoch(
             )
         fetch_started = time.perf_counter()
         step_seconds += fetch_started - step_started
+    # 最後のバッチの後、ループを抜けるまで（DataLoader の終端とワーカーの終了待ち）。
+    loader_end_seconds = time.perf_counter() - fetch_started
     if total_clips == 0:
         raise RuntimeError("学習データが空である")
     train_seconds = time.perf_counter() - started
@@ -1079,6 +1087,7 @@ def _train_one_epoch(
         "train_step_seconds": step_seconds,
         "data_wait_seconds": data_wait_seconds,
         "data_wait_ratio": data_wait_seconds / train_seconds if train_seconds > 0 else 0.0,
+        "loader_end_seconds": loader_end_seconds,
         "train_clips": total_clips,
         # うち無音サンプル（spkrate.train.silence）の件数。拡張は掛けないので、
         # 拡張の実適用率の分母からは除く。
@@ -1583,13 +1592,14 @@ def run_training(
             wait_ratio = float(train_stats["data_wait_ratio"])
             log.info(
                 "エポック%d 所要時間: 全体=%.1f秒 学習ループ=%.1f秒（計算=%.1f秒 "
-                "データ待ち=%.1f秒 比率=%.3f） dev評価=%.1f秒 → %s",
+                "データ待ち=%.1f秒 比率=%.3f 終端処理=%.1f秒） dev評価=%.1f秒 → %s",
                 epoch,
                 epoch_seconds,
                 train_stats["train_seconds"],
                 train_stats["train_step_seconds"],
                 train_stats["data_wait_seconds"],
                 wait_ratio,
+                train_stats["loader_end_seconds"],
                 dev_eval_seconds,
                 "データ読み込み律速"
                 if wait_ratio >= DATA_BOUND_RATIO

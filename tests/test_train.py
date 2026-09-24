@@ -765,11 +765,13 @@ def test_timing_columns_are_written(tmp_path: Path) -> None:
         "train_step_seconds",
         "data_wait_seconds",
         "data_wait_ratio",
+        "loader_end_seconds",
         "dev_eval_seconds",
     ):
         assert key in row and row[key] >= 0.0, key
     assert 0.0 <= row["data_wait_ratio"] <= 1.0
-    assert row["train_step_seconds"] + row["data_wait_seconds"] <= row["train_seconds"] + 1e-6
+    parts = row["train_step_seconds"] + row["data_wait_seconds"] + row["loader_end_seconds"]
+    assert parts == pytest.approx(row["train_seconds"], abs=1e-3)
     assert row["epoch_seconds"] >= row["train_seconds"] + row["dev_eval_seconds"] - 1e-6
     log = _log_text(outcome)
     assert "所要時間: 全体=" in log and "データ待ち=" in log and "dev評価=" in log
