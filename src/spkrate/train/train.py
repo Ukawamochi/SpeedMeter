@@ -78,6 +78,7 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 
 from spkrate.data.augment import (
+    AUGMENTATIONS,
     AugmentConfig,
     AugmentSetupError,
     describe_application_rates,
@@ -830,6 +831,22 @@ class TrainingOutcome:
     mps_fallbacks: list[dict[str, str]]
 
 
+def describe_epoch_augment_counts(
+    epoch: int, counts: dict[str, int], num_clips: int
+) -> str:
+    """エポック終了時に書く、学習中に実際に掛かった拡張の回数（1行）。
+
+    数えるのは ``AugmentResult.effective`` と周波数マスクが実際に掛かった回である
+    （無響になった残響、無音で雑音を足さなかった回などは含まない）。
+    """
+    parts = []
+    for name, label in AUGMENTATIONS:
+        count = int(counts.get(name, 0))
+        rate = count / num_clips if num_clips else 0.0
+        parts.append(f"{label}={count}({rate:.3f})")
+    return f"エポック{epoch} 拡張の実適用回数（学習{num_clips}件中）: " + " ".join(parts)
+
+
 def _train_one_epoch(
     model: SpeechRateCNN,
     loader: DataLoader,
@@ -845,8 +862,12 @@ def _train_one_epoch(
     total_loss = 0.0
     total_clips = 0
     total_abs_error = 0.0
+    augment_counts: dict[str, int] = {}
     started = time.perf_counter()
     for step, batch in enumerate(loader, start=1):
+        for names in getattr(batch, "augment_applied", ()):
+            for name in names:
+                augment_counts[name] = augment_counts.get(name, 0) + 1
         batch = batch.to(device)
         prediction = model(batch.features, batch.lengths)
         loss = loss_fn(prediction, batch.moras)
@@ -875,6 +896,8 @@ def _train_one_epoch(
         "train_mae_moras_per_sec": total_abs_error / total_clips,
         "train_seconds": time.perf_counter() - started,
         "train_clips": total_clips,
+        # 学習中に実際に掛かった拡張の回数。metrics.jsonl には書かず、ログにだけ出す。
+        "augment_counts": augment_counts,
     }
 
 
@@ -1076,6 +1099,14 @@ def run_training(
                 epoch=epoch,
                 logger=log,
             )
+            augment_counts = train_stats.pop("augment_counts", {})
+            if config.augment.enabled:
+                log.info(
+                    "%s",
+                    describe_epoch_augment_counts(
+                        epoch, augment_counts, int(train_stats["train_clips"])
+                    ),
+                )
             metrics, extras, predictions = evaluate_dev(model, dev_loader, loss_fn, device)
 
             row: dict[str, Any] = {

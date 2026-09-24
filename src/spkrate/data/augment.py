@@ -73,6 +73,7 @@ __all__ = [
     "NoiseSource",
     "add_noise",
     "augment_feature",
+    "augment_feature_with_status",
     "augment_waveform",
     "band_limit",
     "change_volume",
@@ -243,6 +244,13 @@ def add_noise(samples: np.ndarray, noise: np.ndarray, snr_db: float) -> np.ndarr
 
     雑音は音声に**重なるだけ**で発話を消さないので、モーラ数は変わらない。
     """
+    return _add_noise(samples, noise, snr_db)[0]
+
+
+def _add_noise(
+    samples: np.ndarray, noise: np.ndarray, snr_db: float
+) -> tuple[np.ndarray, bool]:
+    """``add_noise`` の本体。2つ目の値は実際に雑音を足したかどうか。"""
     waveform = _as_waveform(samples)
     if not math.isfinite(snr_db):
         raise ValueError(f"SN比は有限値である必要がある: {snr_db}")
@@ -252,11 +260,12 @@ def add_noise(samples: np.ndarray, noise: np.ndarray, snr_db: float) -> np.ndarr
     noise_power = float(np.mean(np.square(fitted, dtype=np.float32), dtype=np.float32))
     if signal_power <= _EPSILON:
         # 無音に雑音を足すとSN比が定義できない。そのまま返す。
-        return waveform
+        return waveform, False
     if noise_power <= _EPSILON:
-        return waveform
+        return waveform, False
     scale = math.sqrt(signal_power / (noise_power * (10.0 ** (float(snr_db) / 10.0))))
-    return np.ascontiguousarray((waveform + np.float32(scale) * fitted).astype(np.float32))
+    noisy = np.ascontiguousarray((waveform + np.float32(scale) * fitted).astype(np.float32))
+    return noisy, True
 
 
 class ArrayNoiseSource:
@@ -501,6 +510,20 @@ def band_limit(
         low_hz: これより下を削る。``0`` 以下なら低域は削らない。
         high_hz: これより上を削る。``None`` かナイキスト周波数以上なら高域は削らない。
     """
+    return _band_limit(
+        samples, low_hz=low_hz, high_hz=high_hz, sample_rate=sample_rate, order=order
+    )[0]
+
+
+def _band_limit(
+    samples: np.ndarray,
+    *,
+    low_hz: float,
+    high_hz: float | None,
+    sample_rate: int,
+    order: int,
+) -> tuple[np.ndarray, bool]:
+    """``band_limit`` の本体。2つ目の値は実際にフィルタを掛けたかどうか。"""
     from scipy import signal as scipy_signal
 
     waveform = _as_waveform(samples)
@@ -512,7 +535,7 @@ def band_limit(
     if use_high_pass and use_low_pass and low >= high:
         raise ValueError(f"通過帯域が空: low_hz={low}, high_hz={high}")
     if not use_high_pass and not use_low_pass:
-        return waveform
+        return waveform, False
 
     if use_high_pass and use_low_pass:
         sos = scipy_signal.butter(
@@ -525,9 +548,9 @@ def band_limit(
 
     padlen = 3 * (sos.shape[0] * 2)
     if waveform.size <= padlen:  # 短すぎて零位相フィルタが使えない
-        return waveform
+        return waveform, False
     filtered = scipy_signal.sosfiltfilt(sos, waveform.astype(np.float64))
-    return np.ascontiguousarray(filtered.astype(np.float32))
+    return np.ascontiguousarray(filtered.astype(np.float32)), True
 
 
 # --------------------------------------------------------------------------------------
@@ -555,6 +578,20 @@ def frequency_mask(
     Returns:
         入力とは別の配列（入力は書き換えない）。
     """
+    return _frequency_mask(
+        feature, rng, num_masks=num_masks, max_width=max_width, mask_value=mask_value
+    )[0]
+
+
+def _frequency_mask(
+    feature: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    num_masks: int,
+    max_width: int,
+    mask_value: float,
+) -> tuple[np.ndarray, bool]:
+    """``frequency_mask`` の本体。2つ目の値は幅1以上のマスクを1本でも掛けたかどうか。"""
     array = np.asarray(feature, dtype=np.float32)
     if array.ndim != 2:
         raise ValueError(f"(フレーム数, メル次元数) の2次元配列を渡すこと: ndim={array.ndim}")
@@ -563,14 +600,16 @@ def frequency_mask(
     masked = array.copy()
     n_mels = masked.shape[1]
     if n_mels == 0 or max_width == 0:
-        return masked
+        return masked, False
+    applied = False
     for _ in range(int(num_masks)):
         width = int(rng.integers(0, min(int(max_width), n_mels) + 1))
         if width == 0:
             continue
         start = int(rng.integers(0, n_mels - width + 1))
         masked[:, start : start + width] = np.float32(mask_value)
-    return masked
+        applied = True
+    return masked, applied
 
 
 # --------------------------------------------------------------------------------------
@@ -662,12 +701,18 @@ class AugmentResult:
 
     ``stretch`` 以外の拡張はラベルに影響しない。``stretch`` が影響するのは
     毎秒モーラ数だけで、モーラ数そのものは常に不変である。
+
+    ``applied`` は確率の抽選に当たった拡張、``effective`` はそのうち実際に波形を
+    変えた拡張である。``effective`` からは、伸縮率がちょうど1.0の時間伸縮、無響の応答に
+    なった残響、無音で雑音を足さなかった雑音重畳、フィルタを掛けなかった帯域制限、
+    利得0dBの音量変化を除く。
     """
 
     samples: np.ndarray
     stretch: float = 1.0
     applied: tuple[str, ...] = field(default_factory=tuple)
     params: dict[str, float] = field(default_factory=dict)
+    effective: tuple[str, ...] = field(default_factory=tuple)
 
     def mora_count(self, mora_count: float) -> float:
         """拡張後のモーラ数。**どの拡張でも不変**。"""
@@ -702,6 +747,7 @@ def augment_waveform(
     """
     waveform = _as_waveform(samples)
     applied: list[str] = []
+    effective: list[str] = []
     params: dict[str, float] = {}
     stretch = 1.0
 
@@ -709,6 +755,8 @@ def augment_waveform(
         stretch = _uniform(rng, config.time_stretch_range)
         waveform = time_stretch(waveform, stretch, sample_rate=config.sample_rate)
         applied.append("time_stretch")
+        if stretch != 1.0:
+            effective.append("time_stretch")
         params["stretch"] = stretch
 
     if config.reverb_enabled and rng.random() < config.reverb_prob:
@@ -723,6 +771,8 @@ def augment_waveform(
         )
         waveform = apply_reverb(waveform, rir)
         applied.append("reverb")
+        if rir.size > 1:  # [1.0] は無響の応答（実現できない組）
+            effective.append("reverb")
 
     if (
         config.noise_enabled
@@ -731,14 +781,16 @@ def augment_waveform(
     ):
         snr_db = _uniform(rng, config.snr_db_range)
         noise = noise_source.sample(waveform.size, rng)
-        waveform = add_noise(waveform, noise, snr_db)
+        waveform, noise_added = _add_noise(waveform, noise, snr_db)
         applied.append("noise")
+        if noise_added:
+            effective.append("noise")
         params["snr_db"] = snr_db
 
     if config.band_limit_enabled and rng.random() < config.band_limit_prob:
         low_hz = _uniform(rng, config.low_hz_range)
         high_hz = _uniform(rng, config.high_hz_range)
-        waveform = band_limit(
+        waveform, filtered = _band_limit(
             waveform,
             low_hz=low_hz,
             high_hz=high_hz,
@@ -746,6 +798,8 @@ def augment_waveform(
             order=config.band_limit_order,
         )
         applied.append("band_limit")
+        if filtered:
+            effective.append("band_limit")
         params["low_hz"] = low_hz
         params["high_hz"] = high_hz
 
@@ -753,10 +807,16 @@ def augment_waveform(
         gain_db = _uniform(rng, config.gain_db_range)
         waveform = change_volume(waveform, gain_db)
         applied.append("volume")
+        if gain_db != 0.0:
+            effective.append("volume")
         params["gain_db"] = gain_db
 
     return AugmentResult(
-        samples=waveform, stretch=stretch, applied=tuple(applied), params=params
+        samples=waveform,
+        stretch=stretch,
+        applied=tuple(applied),
+        params=params,
+        effective=tuple(effective),
     )
 
 
@@ -767,15 +827,28 @@ def augment_feature(
     config: AugmentConfig = AugmentConfig(),
 ) -> np.ndarray:
     """特徴量に対する拡張（周波数方向のマスクのみ）。時間方向のマスクは行わない。"""
+    return augment_feature_with_status(feature, rng, config=config)[0]
+
+
+def augment_feature_with_status(
+    feature: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    config: AugmentConfig = AugmentConfig(),
+) -> tuple[np.ndarray, bool]:
+    """``augment_feature`` と同じ処理。2つ目の値は周波数マスクが実際に掛かったかどうか。
+
+    乱数の消費は ``augment_feature`` と同一である。
+    """
     if config.freq_mask_enabled and rng.random() < config.freq_mask_prob:
-        return frequency_mask(
+        return _frequency_mask(
             feature,
             rng,
             num_masks=config.freq_mask_num,
             max_width=config.freq_mask_max_width,
             mask_value=config.freq_mask_value,
         )
-    return np.asarray(feature, dtype=np.float32)
+    return np.asarray(feature, dtype=np.float32), False
 
 
 # --------------------------------------------------------------------------------------

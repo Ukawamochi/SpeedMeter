@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import sys
 from pathlib import Path
@@ -427,3 +428,114 @@ def test_training_log_records_designed_and_actual_rates(tmp_path: Path, musan: P
     assert "設計=0.300 実際=" in reverb
     band = next(line for line in lines if "適用率: 帯域制限" in line)
     assert "設計=0.000 実際=0.000" in band
+
+
+# --------------------------------------------------------------------------------------
+# 学習中の実適用回数（エポック終了時のログ）
+
+
+def test_augment_result_effective_excludes_anechoic_and_silent() -> None:
+    from spkrate.data.augment import ArrayNoiseSource, augment_waveform
+
+    always = {f"{name}_prob": 1.0 for name in _NAMES}
+    noise = ArrayNoiseSource([np.full(1600, 0.1, dtype=np.float32)])
+    signal = (0.1 * np.random.default_rng(0).standard_normal(16000)).astype(np.float32)
+    result = augment_waveform(
+        signal,
+        np.random.default_rng(0),
+        config=AugmentConfig.from_mapping(always),
+        noise_source=noise,
+    )
+    assert set(result.effective) == set(result.applied)
+
+    # 実現できない残響（大きな部屋に短い RT60）と、無音への雑音は effective に入らない
+    hard = AugmentConfig.from_mapping(
+        always
+        | {
+            "time_stretch_enabled": False,
+            "rt60_range": [0.1, 0.1],
+            "room_x_range": [10.0, 10.0],
+            "room_y_range": [10.0, 10.0],
+            "room_z_range": [4.0, 4.0],
+        }
+    )
+    result = augment_waveform(
+        np.zeros(16000, dtype=np.float32), np.random.default_rng(0), config=hard,
+        noise_source=noise,
+    )
+    assert "reverb" in result.applied and "reverb" not in result.effective
+    assert "noise" in result.applied and "noise" not in result.effective
+
+
+def test_augment_feature_with_status_matches_augment_feature() -> None:
+    from spkrate.data.augment import augment_feature, augment_feature_with_status
+
+    feature = np.random.default_rng(0).standard_normal((30, 80)).astype(np.float32)
+    config = AugmentConfig(freq_mask_prob=1.0)
+    plain = augment_feature(feature, np.random.default_rng(3), config=config)
+    masked, applied = augment_feature_with_status(feature, np.random.default_rng(3), config=config)
+    np.testing.assert_array_equal(plain, masked)
+    assert applied == (not np.array_equal(masked, feature))
+
+
+def test_collate_carries_augment_applied() -> None:
+    from spkrate.train.data import ClipItem, collate_clips
+
+    items = [
+        ClipItem(np.zeros((5, 80), np.float32), 1.0, 0.05, "a", ("reverb", "freq_mask")),
+        ClipItem(np.zeros((3, 80), np.float32), 1.0, 0.03, "b"),
+    ]
+    batch = collate_clips(items)
+    assert batch.augment_applied == (("reverb", "freq_mask"), ())
+    assert batch.to("cpu").augment_applied == batch.augment_applied
+
+
+class _TaggedDataset(SyntheticClipDataset):
+    """実際に掛かった拡張の名前を付けた合成データ（学習中の数え上げの試験用）。"""
+
+    def __getitem__(self, index: int):  # type: ignore[override]
+        from dataclasses import replace
+
+        tags = ("reverb", "freq_mask") if index % 2 == 0 else ("volume",)
+        return replace(self.items[index], augment_applied=tags)
+
+
+def test_training_log_records_augment_counts_per_epoch(tmp_path: Path, musan: Path) -> None:
+    config = _config(tmp_path).with_changes(model_overrides=_small_model_config().as_dict())
+    config = config.with_changes(train=dataclasses.replace(config.train, epochs=2))
+    run_training(
+        config,
+        train_dataset=_TaggedDataset(8, seed=0),
+        dev_dataset=SyntheticClipDataset(4, seed=1),
+    )
+    lines = _read_log(config)
+    for epoch in (1, 2):
+        line = next(x for x in lines if f"エポック{epoch} 拡張の実適用回数" in x)
+        assert "学習8件中" in line
+        assert "残響=4(0.500)" in line and "周波数マスク=4(0.500)" in line
+        assert "音量変化=4(0.500)" in line and "時間伸縮=0(0.000)" in line
+    metrics = (config.run_dir / "metrics.jsonl").read_text(encoding="utf-8")
+    assert "augment_counts" not in metrics
+
+
+
+def test_waveform_dataset_reports_effective_augmentations(tmp_path: Path, musan: Path) -> None:
+    from spkrate.data.augment import MusanNoiseSource
+    from spkrate.data.common_voice import ClipRecord
+    from spkrate.train.data import WaveformClipDataset
+
+    t = np.arange(16000, dtype=np.float32) / 16000
+    sf.write(tmp_path / "clip.wav", (0.1 * np.sin(2 * np.pi * 220.0 * t)).astype(np.float32), 16000)
+    record = ClipRecord(
+        clip_id="c0", audio_path="clip.wav", client_id="x", sentence="テスト", kana="テスト",
+        mora=3, duration_sec=1.0, mora_per_second=3.0,
+    )
+    config = AugmentConfig.from_mapping(
+        {f"{name}_prob": 1.0 for name in _NAMES} | {"reverb_enabled": False}
+    )
+    dataset = WaveformClipDataset(
+        [record], tmp_path, augment=config, noise_source=MusanNoiseSource(musan), seed=0
+    )
+    item = dataset[0]
+    assert "reverb" not in item.augment_applied
+    assert {"time_stretch", "noise", "band_limit", "volume"} <= set(item.augment_applied)
