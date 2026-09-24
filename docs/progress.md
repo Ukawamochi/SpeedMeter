@@ -159,3 +159,7 @@
 - フレーム出力は対象群の20件で全フレーム0.01以下、44件で全フレーム0.05以下（比較群は0件）。MPSのCPUフォールバックは無し。pytest 398件全通過。
 - exp001は augment.enabled=false で、音量変化・雑音重畳の適用率はいずれも0。コード既定値は音量変化 p=0.5・−12〜+6 dB、雑音 p=0.5・SNR 0〜20 dB。D2は雑音のみの入力でSNR未定義のため、学習時のSNR範囲とは一致しない。results/augmentation_check.md。
 - 未解決: 拡張ありの経路では音声パスの既定値が存在しない場所になる（train.py 157・data.py 396）。修正は未実施で、詳細はaugmentation_check.md 3.2節。第7段階には進んでいない。
+
+### 2026-09-24 拡張設定の欠落を学習開始前に検出（完了）
+- run_training の冒頭で check_augment_setup を呼ぶ。musan_root が欠けている場合、features 経路、確率0、無変化の範囲、依存の欠落など21条件で AugmentSetupError を投げて停止する。log.txt の先頭にコミットと拡張の一覧（無効なら「拡張=なし」）を書く。
+- 一覧は results/augment_validation.md。判断を保留した4件は docs/questions.md。pytest は433件すべて通過。
