@@ -8,11 +8,13 @@
   （musan_root の欠落、features 経路、確率0、無変化の範囲、依存の欠落など）
 - 止まるのはデータ読み込み・モデル構築より前で、理由が log.txt に残る
 - 正しい設定では止まらず、log.txt の学習ループより前に拡張の一覧が出る
-- 拡張が無効なら「拡張=なし」と出る
+- 拡張が無効なら「拡張=なし」と出る。無効なのに params や musan_root が書かれていれば
+  止めずに警告を出し、log.txt にも残す
 """
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -205,3 +207,55 @@ def test_training_stops_before_model_and_logs_reason(tmp_path: Path) -> None:
     assert "拡張の設定の誤りで停止する" in text
     assert "モデル:" not in text
     assert not (config.run_dir / "metrics.jsonl").exists()
+
+
+# --------------------------------------------------------------------------------------
+# 拡張が無効なのに設定が書かれている場合（docs/questions.md 2026-09-24 回答1）
+
+_TEST_LOGGER = "test_augment_validation"
+
+
+@pytest.mark.parametrize(
+    ("augment", "expected"),
+    [
+        ({"params": {"noise_prob": 0.2}}, "augment.params"),
+        ({}, "augment.musan_root"),  # _config は musan_root を書く
+    ],
+)
+def test_disabled_augment_with_settings_warns_but_continues(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, augment: dict[str, Any], expected: str
+) -> None:
+    config = _config(tmp_path, augment={"enabled": False, **augment}, source="features")
+    # spkrate.train は setup_logger で propagate=False になりうるので、専用のロガーを渡す。
+    with caplog.at_level("WARNING", logger=_TEST_LOGGER):
+        lines = check_augment_setup(config, logging.getLogger(_TEST_LOGGER))
+    assert lines == ["拡張=なし"]
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert expected in warnings[0].getMessage()
+    assert "使われない" in warnings[0].getMessage()
+
+
+def test_disabled_augment_without_settings_does_not_warn(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config = _config(tmp_path, augment={"enabled": False, "musan_root": None}, source="features")
+    with caplog.at_level("WARNING", logger=_TEST_LOGGER):
+        assert check_augment_setup(config, logging.getLogger(_TEST_LOGGER)) == ["拡張=なし"]
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_disabled_augment_warning_is_written_to_log_txt(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path, augment={"enabled": False, "params": {"noise_prob": 0.2}}, source="features"
+    )
+    config = config.with_changes(model_overrides=_small_model_config().as_dict())
+    run_training(
+        config,
+        train_dataset=SyntheticClipDataset(8, seed=0),
+        dev_dataset=SyntheticClipDataset(4, seed=1),
+    )
+    lines = _read_log(config)
+    warning = next(line for line in lines if "WARNING" in line and "augment.params" in line)
+    assert "augment.musan_root" in warning
+    assert any("エポック1" in line for line in lines)  # 止まらずに学習した

@@ -686,17 +686,34 @@ def build_datasets(
     return train_dataset, dev_dataset, normalizer
 
 
-def check_augment_setup(config: TrainConfig) -> list[str]:
+def check_augment_setup(
+    config: TrainConfig, logger: logging.Logger | None = None
+) -> list[str]:
     """拡張の設定を学習開始前に検査し、ログに書く一覧を返す。
 
     データの読み込みやモデルの構築より前に呼ぶ（``run_training`` の冒頭）。
     拡張が有効なのに、ある拡張が黙って実行されない設定を ``AugmentSetupError`` で止める。
     検出する条件と、止めない条件の一覧は results/augment_validation.md。
 
+    ``augment.enabled=false`` なのに ``augment.params`` や ``augment.musan_root`` が
+    書かれている設定は止めず、``logger`` に警告を出す（docs/questions.md 2026-09-24 回答1）。
+    ``run_training`` は学習ログ（log.txt に書くロガー）を渡す。
+
     Returns:
         ``log.txt`` に書く行。無効なら ``["拡張=なし"]``。
     """
+    log = logger or logging.getLogger(LOGGER_NAME)
     if not config.augment.enabled:
+        ignored = []
+        if config.augment.params:
+            ignored.append(f"augment.params（{', '.join(sorted(config.augment.params))}）")
+        if config.augment.musan_root:
+            ignored.append(f"augment.musan_root={config.augment.musan_root}")
+        if ignored:
+            log.warning(
+                "augment.enabled=false のため、書かれている %s は使われない（学習は続ける）",
+                "・".join(ignored),
+            )
         return ["拡張=なし"]
 
     source = config.train_source
@@ -949,7 +966,7 @@ def run_training(
         config.config_path or "（なし）",
     )
     try:
-        augment_lines = check_augment_setup(config)
+        augment_lines = check_augment_setup(config, log)
     except AugmentSetupError as error:
         log.error("拡張の設定の誤りで停止する: %s", error)
         raise
