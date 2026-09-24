@@ -62,6 +62,9 @@ __all__ = [
     "STFT_HOP_LENGTH",
     "STFT_N_FFT",
     "AUGMENTATIONS",
+    "APPLICATION_RATE_SEED",
+    "APPLICATION_RATE_TRIALS",
+    "ApplicationRate",
     "AugmentConfig",
     "AugmentResult",
     "AugmentSetupError",
@@ -73,7 +76,9 @@ __all__ = [
     "augment_waveform",
     "band_limit",
     "change_volume",
+    "describe_application_rates",
     "describe_augment_config",
+    "estimate_application_rates",
     "fit_noise",
     "frequency_mask",
     "generate_rir",
@@ -355,6 +360,34 @@ class MusanNoiseSource:
 # 残響
 
 
+def _draw_room(
+    rng: np.random.Generator,
+    room_x_range: Sequence[float],
+    room_y_range: Sequence[float],
+    room_z_range: Sequence[float],
+    rt60_range: Sequence[float],
+) -> tuple[list[float], float]:
+    """部屋の寸法と残響時間を引く（``generate_rir`` と適用率の実測で共用）。"""
+    room_dim = [
+        _uniform(rng, room_x_range),
+        _uniform(rng, room_y_range),
+        _uniform(rng, room_z_range),
+    ]
+    rt60 = _uniform(rng, rt60_range)
+    return room_dim, rt60
+
+
+def _inverse_sabine(rt60: float, room_dim: Sequence[float]) -> tuple[float, int] | None:
+    """Sabine の式の逆算。その寸法で実現できない残響時間なら ``None``。"""
+    import pyroomacoustics as pra
+
+    try:
+        absorption, sabine_order = pra.inverse_sabine(rt60, list(room_dim))
+    except ValueError:
+        return None
+    return absorption, sabine_order
+
+
 def generate_rir(
     rng: np.random.Generator,
     *,
@@ -377,17 +410,12 @@ def generate_rir(
     """
     import pyroomacoustics as pra
 
-    room_dim = [
-        _uniform(rng, room_x_range),
-        _uniform(rng, room_y_range),
-        _uniform(rng, room_z_range),
-    ]
-    rt60 = _uniform(rng, rt60_range)
-    try:
-        absorption, sabine_order = pra.inverse_sabine(rt60, room_dim)
-    except ValueError:
+    room_dim, rt60 = _draw_room(rng, room_x_range, room_y_range, room_z_range, rt60_range)
+    sabine = _inverse_sabine(rt60, room_dim)
+    if sabine is None:
         # その寸法では実現できない残響時間（吸音率が1を超える）。無響に近い応答を返す。
         return np.array([1.0], dtype=np.float32)
+    absorption, sabine_order = sabine
 
     room = pra.ShoeBox(
         room_dim,
@@ -984,4 +1012,140 @@ def describe_augment_config(
     for index, (name, label) in enumerate(AUGMENTATIONS, start=1):
         if not getattr(config, f"{name}_enabled"):
             lines[index] = f"拡張: {label} 無効（{name}_enabled=false）"
+    return lines
+
+
+# --------------------------------------------------------------------------------------
+# 設計上の確率と実際の適用率（docs/questions.md 2026-09-24 回答4）
+
+#: 適用率を実測するときの既定の抽選回数と乱数の種。
+APPLICATION_RATE_TRIALS = 2000
+APPLICATION_RATE_SEED = 0
+# 周波数マスクの幅を引くときのメル次元数（docs/spec.md「n_mels=80」）。
+_N_MELS = 80
+
+
+@dataclass(frozen=True)
+class ApplicationRate:
+    """1種類の拡張の、設計上の確率と実際の適用率。"""
+
+    name: str
+    label: str
+    designed: float
+    selected: int  # 確率の抽選に当たった回数
+    applied: int  # そのうち実際に掛かった回数
+    trials: int
+
+    @property
+    def actual(self) -> float:
+        return self.applied / self.trials if self.trials else 0.0
+
+
+def estimate_application_rates(
+    config: AugmentConfig,
+    *,
+    noise_available: bool = True,
+    num_trials: int = APPLICATION_RATE_TRIALS,
+    seed: int = APPLICATION_RATE_SEED,
+    n_mels: int = _N_MELS,
+) -> list[ApplicationRate]:
+    """``config`` に従って抽選とパラメータ生成だけを ``num_trials`` 回行い、適用率を実測する。
+
+    波形は処理しない（2000回で1秒未満）。「実際には適用されなかった」と数えるのは、
+    パラメータだけで決まる次の場合である。
+
+    - 時間伸縮: 引いた伸縮率がちょうど1.0
+    - 残響: 引いた部屋の寸法と RT60 の組が実現できず、無響の応答 ``[1.0]`` になる
+    - 雑音重畳: 雑音源が無い（``noise_available=False``）
+    - 帯域制限: 引いた低域遮断が0以下かつ高域遮断がナイキスト周波数以上
+    - 音量変化: 引いた利得がちょうど0dB
+    - 周波数マスク: どのマスクの幅も0
+
+    波形に依存するスキップ（無音の区間に雑音を足さない、音量の上限クリップ）は数えない。
+
+    Returns:
+        ``AUGMENTATIONS`` の順の ``ApplicationRate``。設計上の確率は、個別に無効な拡張と
+        雑音源の無い雑音重畳では0とする。
+    """
+    if num_trials < 1:
+        raise ValueError(f"抽選回数は1以上: {num_trials}")
+    rng = np.random.default_rng(seed)
+    nyquist = float(config.sample_rate) / 2.0
+    enabled = {
+        "time_stretch": bool(config.time_stretch_enabled),
+        "reverb": bool(config.reverb_enabled),
+        "noise": bool(config.noise_enabled) and noise_available,
+        "band_limit": bool(config.band_limit_enabled),
+        "volume": bool(config.volume_enabled),
+        "freq_mask": bool(config.freq_mask_enabled),
+    }
+    counts = {name: 0 for name, _ in AUGMENTATIONS}
+    selected = {name: 0 for name, _ in AUGMENTATIONS}
+    for _ in range(int(num_trials)):
+        if enabled["time_stretch"] and rng.random() < config.time_stretch_prob:
+            selected["time_stretch"] += 1
+            if _uniform(rng, config.time_stretch_range) != 1.0:
+                counts["time_stretch"] += 1
+        if enabled["reverb"] and rng.random() < config.reverb_prob:
+            selected["reverb"] += 1
+            room_dim, rt60 = _draw_room(
+                rng,
+                config.room_x_range,
+                config.room_y_range,
+                config.room_z_range,
+                config.rt60_range,
+            )
+            if _inverse_sabine(rt60, room_dim) is not None:
+                counts["reverb"] += 1
+        if enabled["noise"] and rng.random() < config.noise_prob:
+            selected["noise"] += 1
+            _uniform(rng, config.snr_db_range)
+            counts["noise"] += 1
+        if enabled["band_limit"] and rng.random() < config.band_limit_prob:
+            selected["band_limit"] += 1
+            low_hz = _uniform(rng, config.low_hz_range)
+            high_hz = _uniform(rng, config.high_hz_range)
+            if low_hz > 0.0 or high_hz < nyquist:
+                counts["band_limit"] += 1
+        if enabled["volume"] and rng.random() < config.volume_prob:
+            selected["volume"] += 1
+            if _uniform(rng, config.gain_db_range) != 0.0:
+                counts["volume"] += 1
+        if enabled["freq_mask"] and rng.random() < config.freq_mask_prob:
+            selected["freq_mask"] += 1
+            widest = min(int(config.freq_mask_max_width), int(n_mels))
+            widths = [
+                int(rng.integers(0, widest + 1)) if widest > 0 else 0
+                for _ in range(max(int(config.freq_mask_num), 0))
+            ]
+            if any(width > 0 for width in widths):
+                counts["freq_mask"] += 1
+    return [
+        ApplicationRate(
+            name=name,
+            label=label,
+            designed=float(getattr(config, f"{name}_prob")) if enabled[name] else 0.0,
+            selected=selected[name],
+            applied=counts[name],
+            trials=int(num_trials),
+        )
+        for name, label in AUGMENTATIONS
+    ]
+
+
+def describe_application_rates(
+    rates: Sequence[ApplicationRate], *, seed: int = APPLICATION_RATE_SEED
+) -> list[str]:
+    """学習ログに書く、設計上の確率と実際の適用率の行（1拡張1行）。"""
+    trials = rates[0].trials if rates else 0
+    lines = [
+        f"拡張の適用率（学習開始前に固定シード{seed}で{trials}回抽選・パラメータ生成）: "
+        "設計=設定上の確率 実際=実際に掛かった割合（残響の無響の組などは適用なしと数える。"
+        "無音への雑音・音量の上限クリップなど波形に依存するスキップは含まない）"
+    ]
+    for rate in rates:
+        lines.append(
+            f"適用率: {rate.label} 設計={rate.designed:.3f} 実際={rate.actual:.3f}"
+            f"（抽選に当たった{rate.selected}回のうち{rate.applied}回が実際に掛かった／{rate.trials}回）"
+        )
     return lines

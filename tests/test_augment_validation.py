@@ -356,3 +356,74 @@ def test_out_of_spec_range_is_ignored_when_individually_disabled(
 ) -> None:
     params = {"time_stretch_enabled": False, "time_stretch_range": [0.5, 2.0]}
     check_augment_setup(_config(tmp_path, augment={"params": params}))
+
+
+# --------------------------------------------------------------------------------------
+# 設計上の確率と実際の適用率（docs/questions.md 2026-09-24 回答4）
+
+
+def test_application_rates_are_deterministic_and_fast() -> None:
+    import time
+
+    from spkrate.data.augment import APPLICATION_RATE_TRIALS, estimate_application_rates
+
+    started = time.perf_counter()
+    first = estimate_application_rates(AugmentConfig())
+    elapsed = time.perf_counter() - started
+    assert elapsed < 30.0
+    assert first == estimate_application_rates(AugmentConfig())
+    assert [rate.label for rate in first] == list(_LABELS)
+    for rate in first:
+        assert rate.trials == APPLICATION_RATE_TRIALS
+        assert rate.applied <= rate.selected <= rate.trials
+        assert rate.designed == getattr(AugmentConfig(), f"{rate.name}_prob")
+        # 2000回なら抽選の揺らぎは設計上の確率から0.05以内に収まる
+        assert abs(rate.selected / rate.trials - rate.designed) < 0.05
+
+
+def test_anechoic_reverb_is_counted_as_not_applied() -> None:
+    from spkrate.data.augment import estimate_application_rates
+
+    rates = {rate.name: rate for rate in estimate_application_rates(AugmentConfig())}
+    reverb = rates["reverb"]
+    assert reverb.applied < reverb.selected  # 既定の範囲では一部の組が無響になる
+    assert 0.0 < 1.0 - reverb.applied / reverb.selected < 0.15
+    for name in ("time_stretch", "noise", "band_limit", "volume"):
+        assert rates[name].applied == rates[name].selected
+
+    # 大きな部屋と短い RT60 だけなら、ほぼすべての組が実現できない
+    hard = AugmentConfig(rt60_range=(0.1, 0.12), room_x_range=(9.0, 10.0),
+                         room_y_range=(9.0, 10.0), room_z_range=(3.5, 4.0))
+    reverb = {rate.name: rate for rate in estimate_application_rates(hard)}["reverb"]
+    assert reverb.selected > 0 and reverb.applied < reverb.selected // 2
+
+
+def test_application_rates_for_disabled_and_missing_noise() -> None:
+    from spkrate.data.augment import estimate_application_rates
+
+    config = AugmentConfig(volume_enabled=False)
+    rates = {rate.name: rate for rate in estimate_application_rates(config, noise_available=False)}
+    assert rates["volume"].designed == 0.0 and rates["volume"].applied == 0
+    assert rates["noise"].designed == 0.0 and rates["noise"].applied == 0
+    assert rates["reverb"].designed == 0.3
+
+
+def test_training_log_records_designed_and_actual_rates(tmp_path: Path, musan: Path) -> None:
+    config = _config(tmp_path, augment={"params": {"band_limit_enabled": False}})
+    config = config.with_changes(model_overrides=_small_model_config().as_dict())
+    run_training(
+        config,
+        train_dataset=SyntheticClipDataset(8, seed=0),
+        dev_dataset=SyntheticClipDataset(4, seed=1),
+    )
+    lines = _read_log(config)
+    model_line = next(i for i, line in enumerate(lines) if "モデル:" in line)
+    rate_lines = [i for i, line in enumerate(lines) if "適用率: " in line]
+    assert len(rate_lines) == len(_LABELS)
+    assert max(rate_lines) < model_line
+    header = next(line for line in lines if "拡張の適用率（" in line)
+    assert "固定シード0で2000回" in header
+    reverb = next(line for line in lines if "適用率: 残響" in line)
+    assert "設計=0.300 実際=" in reverb
+    band = next(line for line in lines if "適用率: 帯域制限" in line)
+    assert "設計=0.000 実際=0.000" in band

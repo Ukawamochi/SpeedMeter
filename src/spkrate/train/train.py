@@ -80,7 +80,9 @@ from torch.utils.data import DataLoader, Dataset
 from spkrate.data.augment import (
     AugmentConfig,
     AugmentSetupError,
+    describe_application_rates,
     describe_augment_config,
+    estimate_application_rates,
     validate_augment_config,
 )
 from spkrate.eval.metrics import SpeedRateMetrics, compute_metrics
@@ -730,7 +732,11 @@ def check_augment_setup(
     noise_description = "（使わない）"
     if augment_config.noise_enabled:
         noise_description = _check_musan(config.augment.musan_root)
-    return describe_augment_config(augment_config, noise_description=noise_description)
+    lines = describe_augment_config(augment_config, noise_description=noise_description)
+    # 設計上の確率と実際の適用率の両方を残す（docs/questions.md 2026-09-24 回答4）。
+    # ここまで来れば、雑音重畳が有効なら雑音源はある。
+    rates = estimate_application_rates(augment_config, noise_available=True)
+    return lines + describe_application_rates(rates)
 
 
 def _check_musan(musan_root: str | None) -> str:
