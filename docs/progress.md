@@ -182,3 +182,10 @@
 - configs/eval/dev_noisy.yaml と src/spkrate/eval/noisy.py を追加した。dev全件×SNR 5/10/15dBに固定の残響（6.0×4.5×2.7m、RT60目標0.5秒、max_order 30で実測0.51秒）→MUSAN noiseを掛ける。雑音はシード20260924とclip_idで決まりSNRに依存しない。波形から都度生成（dev全件×3条件で約6分の見積り）。
 - runner.py と scripts/eval_dev_full.py で metrics.csv の split 列を dev / dev_noisy_snr5・10・15 / dev_noisy_all（3条件まとめ）に分けて追記する。noisy行のconfig_pathは「実験設定;dev_noisy設定」。
 - exp001 で dev 先頭200件の clean・noisy 評価が通ることをテスト用の csv で確認した（results/metrics.csv には追記していない）。dev全件の noisy 評価は未実施。
+
+### 2026-09-25 exp003（学習中）に対する8以上帯MAE揺れの調査（第7段階には未進行）
+- 指定のエポック16チェックポイントは上書き保存方式のため学習継続中に消失、ユーザー承認により実行時点のcheckpoint_best.pt（epoch=25）で代替した。results/dev_distribution.md：8以上帯MAEのブートストラップ95%CI幅0.1661はエポック間揺れ幅0.166とほぼ同一（約1.0006倍）。
+- results/error_direction.md：過小評価が話速帯とともに系統的に強まる（4未満44.7%→8以上81.2%、平均誤差+0.0619→-1.1174）。results/loss_definition.md：train/val損失の定義は同一（mse・同一集約）で、エポック16の比率約2.338倍は定義差だけでは説明できない。
+- results/lr_schedule.md：Adam・学習率0.0001固定（スケジューラなし、resume時も設定値で上書き）、weight_decay=0.0・grad_clip=5.0・dropout=0.0。results/checkpoint_comparison.md：全体MAE最小=epoch25、8以上帯MAE最小=epoch18で異なる。
+- チェックポイントは最良1つのみ保存されていたため、train.save_every_epoch（既定True）を追加しエポックごとの個別保存を有効化（再学習はしていない）。pytest 552件全通過。
+- 未解決点：残差（損失比率約2.338倍のうち定義差以外の要因）は本調査の範囲外。第7段階には進んでいない。
