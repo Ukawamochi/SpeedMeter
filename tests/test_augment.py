@@ -574,3 +574,33 @@ def test_augmented_waveform_feeds_the_mel_front_end() -> None:
     assert feature.shape == (num_frames(result.samples.size), 80)
     assert feature.dtype == np.float32
     assert np.all(np.isfinite(feature))
+
+
+# --------------------------------------------------------------------------------------
+# 拡張ごとの有効フラグ（docs/questions.md 2026-09-24 回答2）
+
+
+def test_individually_disabled_augmentations_are_not_applied() -> None:
+    from spkrate.data.augment import AUGMENTATIONS
+
+    rng_signal = np.random.default_rng(0)
+    samples = (0.1 * rng_signal.standard_normal(16000)).astype(np.float32)
+    noise = ArrayNoiseSource([(0.1 * rng_signal.standard_normal(16000)).astype(np.float32)])
+    waveform_names = [name for name, _ in AUGMENTATIONS if name != "freq_mask"]
+    for disabled in waveform_names:
+        config = AugmentConfig.from_mapping(
+            {
+                f"{name}_prob": 1.0 for name, _ in AUGMENTATIONS
+            }
+            | {f"{disabled}_enabled": False}
+        )
+        result = augment_waveform(samples, np.random.default_rng(1), config=config, noise_source=noise)
+        assert disabled not in result.applied
+        assert set(result.applied) == set(waveform_names) - {disabled}
+
+
+def test_freq_mask_disabled_returns_feature_unchanged() -> None:
+    feature = np.random.default_rng(0).standard_normal((50, 80)).astype(np.float32)
+    config = AugmentConfig.from_mapping({"freq_mask_prob": 1.0, "freq_mask_enabled": False})
+    out = augment_feature(feature, np.random.default_rng(0), config=config)
+    np.testing.assert_array_equal(out, feature)

@@ -78,9 +78,12 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 
 from spkrate.data.augment import (
+    AUGMENTATIONS,
     AugmentConfig,
     AugmentSetupError,
+    describe_application_rates,
     describe_augment_config,
+    estimate_application_rates,
     validate_augment_config,
 )
 from spkrate.eval.metrics import SpeedRateMetrics, compute_metrics
@@ -686,17 +689,34 @@ def build_datasets(
     return train_dataset, dev_dataset, normalizer
 
 
-def check_augment_setup(config: TrainConfig) -> list[str]:
+def check_augment_setup(
+    config: TrainConfig, logger: logging.Logger | None = None
+) -> list[str]:
     """拡張の設定を学習開始前に検査し、ログに書く一覧を返す。
 
     データの読み込みやモデルの構築より前に呼ぶ（``run_training`` の冒頭）。
     拡張が有効なのに、ある拡張が黙って実行されない設定を ``AugmentSetupError`` で止める。
     検出する条件と、止めない条件の一覧は results/augment_validation.md。
 
+    ``augment.enabled=false`` なのに ``augment.params`` や ``augment.musan_root`` が
+    書かれている設定は止めず、``logger`` に警告を出す（docs/questions.md 2026-09-24 回答1）。
+    ``run_training`` は学習ログ（log.txt に書くロガー）を渡す。
+
     Returns:
         ``log.txt`` に書く行。無効なら ``["拡張=なし"]``。
     """
+    log = logger or logging.getLogger(LOGGER_NAME)
     if not config.augment.enabled:
+        ignored = []
+        if config.augment.params:
+            ignored.append(f"augment.params（{', '.join(sorted(config.augment.params))}）")
+        if config.augment.musan_root:
+            ignored.append(f"augment.musan_root={config.augment.musan_root}")
+        if ignored:
+            log.warning(
+                "augment.enabled=false のため、書かれている %s は使われない（学習は続ける）",
+                "・".join(ignored),
+            )
         return ["拡張=なし"]
 
     source = config.train_source
@@ -707,11 +727,26 @@ def check_augment_setup(config: TrainConfig) -> list[str]:
             "data.source を waveform にすること"
         )
 
-    musan_root = config.augment.musan_root
+    augment_config = config.augment.build()
+    assert augment_config is not None
+    validate_augment_config(augment_config)
+    noise_description = "（使わない）"
+    if augment_config.noise_enabled:
+        noise_description = _check_musan(config.augment.musan_root)
+    lines = describe_augment_config(augment_config, noise_description=noise_description)
+    # 設計上の確率と実際の適用率の両方を残す（docs/questions.md 2026-09-24 回答4）。
+    # ここまで来れば、雑音重畳が有効なら雑音源はある。
+    rates = estimate_application_rates(augment_config, noise_available=True)
+    return lines + describe_application_rates(rates)
+
+
+def _check_musan(musan_root: str | None) -> str:
+    """雑音重畳が有効なときの雑音源の検査。ログに書く雑音源の説明を返す。"""
     if not musan_root:
         raise AugmentSetupError(
             "augment.enabled=true だが augment.musan_root が未設定で、雑音重畳が一度も"
             "行われない。MUSAN の配置先（data/DATASETS.md、通常は data/musan）を書くこと"
+            "（雑音重畳を外すなら augment.params に noise_enabled: false と書く）"
         )
     if not Path(musan_root).is_dir():
         raise AugmentSetupError(
@@ -728,19 +763,16 @@ def check_augment_setup(config: TrainConfig) -> list[str]:
             f"augment.musan_root={musan_root} に雑音ファイルが無く、雑音重畳が一度も"
             f"行われない（{error}）"
         ) from error
-
-    augment_config = config.augment.build()
-    assert augment_config is not None
-    validate_augment_config(augment_config)
     subsets = "、".join(str(Path(musan_root) / subset) for subset in noise.subsets)
-    return describe_augment_config(
-        augment_config, noise_description=f"{subsets}（{len(noise_paths)}ファイル）"
-    )
+    return f"{subsets}（{len(noise_paths)}ファイル）"
 
 
 def _build_noise_source(config: TrainConfig, logger: logging.Logger) -> Any:
     """MUSAN の noise サブセットを雑音源として用意する（設定にあれば）。"""
     if not config.augment.enabled or not config.augment.musan_root:
+        return None
+    augment_config = config.augment.build()
+    if augment_config is not None and not augment_config.noise_enabled:
         return None
     from spkrate.data.augment import MusanNoiseSource
 
@@ -799,6 +831,22 @@ class TrainingOutcome:
     mps_fallbacks: list[dict[str, str]]
 
 
+def describe_epoch_augment_counts(
+    epoch: int, counts: dict[str, int], num_clips: int
+) -> str:
+    """エポック終了時に書く、学習中に実際に掛かった拡張の回数（1行）。
+
+    数えるのは ``AugmentResult.effective`` と周波数マスクが実際に掛かった回である
+    （無響になった残響、無音で雑音を足さなかった回などは含まない）。
+    """
+    parts = []
+    for name, label in AUGMENTATIONS:
+        count = int(counts.get(name, 0))
+        rate = count / num_clips if num_clips else 0.0
+        parts.append(f"{label}={count}({rate:.3f})")
+    return f"エポック{epoch} 拡張の実適用回数（学習{num_clips}件中）: " + " ".join(parts)
+
+
 def _train_one_epoch(
     model: SpeechRateCNN,
     loader: DataLoader,
@@ -814,8 +862,12 @@ def _train_one_epoch(
     total_loss = 0.0
     total_clips = 0
     total_abs_error = 0.0
+    augment_counts: dict[str, int] = {}
     started = time.perf_counter()
     for step, batch in enumerate(loader, start=1):
+        for names in getattr(batch, "augment_applied", ()):
+            for name in names:
+                augment_counts[name] = augment_counts.get(name, 0) + 1
         batch = batch.to(device)
         prediction = model(batch.features, batch.lengths)
         loss = loss_fn(prediction, batch.moras)
@@ -844,6 +896,8 @@ def _train_one_epoch(
         "train_mae_moras_per_sec": total_abs_error / total_clips,
         "train_seconds": time.perf_counter() - started,
         "train_clips": total_clips,
+        # 学習中に実際に掛かった拡張の回数。metrics.jsonl には書かず、ログにだけ出す。
+        "augment_counts": augment_counts,
     }
 
 
@@ -949,7 +1003,7 @@ def run_training(
         config.config_path or "（なし）",
     )
     try:
-        augment_lines = check_augment_setup(config)
+        augment_lines = check_augment_setup(config, log)
     except AugmentSetupError as error:
         log.error("拡張の設定の誤りで停止する: %s", error)
         raise
@@ -1045,6 +1099,14 @@ def run_training(
                 epoch=epoch,
                 logger=log,
             )
+            augment_counts = train_stats.pop("augment_counts", {})
+            if config.augment.enabled:
+                log.info(
+                    "%s",
+                    describe_epoch_augment_counts(
+                        epoch, augment_counts, int(train_stats["train_clips"])
+                    ),
+                )
             metrics, extras, predictions = evaluate_dev(model, dev_loader, loss_fn, device)
 
             row: dict[str, Any] = {

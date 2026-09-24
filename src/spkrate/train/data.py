@@ -46,7 +46,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from spkrate.data.augment import AugmentConfig, NoiseSource, augment_feature, augment_waveform
+from spkrate.data.augment import (
+    AugmentConfig,
+    NoiseSource,
+    augment_feature_with_status,
+    augment_waveform,
+)
 from spkrate.data.common_voice import ClipRecord
 from spkrate.data.splits import load_clip_records, load_split
 from spkrate.features.melspec import MEL_DEFAULTS, LogMelSpectrogram
@@ -129,12 +134,15 @@ class ClipItem:
         mora: そのクリップの正解モーラ数（毎秒モーラ数ではない）。
         duration_sec: クリップ長（秒）。評価で毎秒モーラ数へ直すときに使う。
         clip_id: クリップの識別子。
+        augment_applied: 実際に掛かった拡張の名前（``AugmentResult.effective`` と
+            周波数マスクの ``freq_mask``）。拡張なしの経路では空。
     """
 
     features: np.ndarray
     mora: float
     duration_sec: float
     clip_id: str
+    augment_applied: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -146,6 +154,7 @@ class Batch:
     moras: torch.Tensor  # (バッチ,) float32  正解モーラ数
     durations: torch.Tensor  # (バッチ,) float32  クリップ長（秒）
     clip_ids: tuple[str, ...]
+    augment_applied: tuple[tuple[str, ...], ...] = ()  # 件ごとの実際に掛かった拡張
 
     def __len__(self) -> int:
         return int(self.features.shape[0])
@@ -157,6 +166,7 @@ class Batch:
             moras=self.moras.to(device),
             durations=self.durations.to(device),
             clip_ids=self.clip_ids,
+            augment_applied=self.augment_applied,
         )
 
 
@@ -187,6 +197,7 @@ def collate_clips(items: Sequence[ClipItem]) -> Batch:
             [float(item.duration_sec) for item in items], dtype=torch.float32
         ),
         clip_ids=tuple(item.clip_id for item in items),
+        augment_applied=tuple(tuple(getattr(item, "augment_applied", ())) for item in items),
     )
 
 
@@ -395,23 +406,28 @@ class WaveformClipDataset(Dataset):
         record = self.records[index]
         samples, sample_rate = load_audio(self.audio_root / record.audio_path)
         rng = np.random.default_rng((self.seed, self.epoch, index))
+        applied: list[str] = []
         if self.augment is not None:
             result = augment_waveform(
                 samples, rng, config=self.augment, noise_source=self.noise_source
             )
             samples = result.samples
+            applied.extend(result.effective)
         duration_sec = float(len(samples)) / float(sample_rate)
         feature = self._mel()(samples, sample_rate)
         if self.normalizer is not None:
             feature = self.normalizer(feature)
         if self.augment is not None:
             # 周波数方向のマスクは正規化後の特徴量に掛ける（006の2節）。
-            feature = augment_feature(feature, rng, config=self.augment)
+            feature, masked = augment_feature_with_status(feature, rng, config=self.augment)
+            if masked:
+                applied.append("freq_mask")
         return ClipItem(
             features=np.asarray(feature, dtype=np.float32),
             mora=float(record.mora),
             duration_sec=duration_sec,
             clip_id=record.clip_id,
+            augment_applied=tuple(applied),
         )
 
     def __getstate__(self) -> dict[str, Any]:

@@ -58,8 +58,13 @@ import numpy as np
 
 __all__ = [
     "SAMPLE_RATE",
+    "SPEC_RANGES",
     "STFT_HOP_LENGTH",
     "STFT_N_FFT",
+    "AUGMENTATIONS",
+    "APPLICATION_RATE_SEED",
+    "APPLICATION_RATE_TRIALS",
+    "ApplicationRate",
     "AugmentConfig",
     "AugmentResult",
     "AugmentSetupError",
@@ -68,10 +73,13 @@ __all__ = [
     "NoiseSource",
     "add_noise",
     "augment_feature",
+    "augment_feature_with_status",
     "augment_waveform",
     "band_limit",
     "change_volume",
+    "describe_application_rates",
     "describe_augment_config",
+    "estimate_application_rates",
     "fit_noise",
     "frequency_mask",
     "generate_rir",
@@ -236,6 +244,13 @@ def add_noise(samples: np.ndarray, noise: np.ndarray, snr_db: float) -> np.ndarr
 
     雑音は音声に**重なるだけ**で発話を消さないので、モーラ数は変わらない。
     """
+    return _add_noise(samples, noise, snr_db)[0]
+
+
+def _add_noise(
+    samples: np.ndarray, noise: np.ndarray, snr_db: float
+) -> tuple[np.ndarray, bool]:
+    """``add_noise`` の本体。2つ目の値は実際に雑音を足したかどうか。"""
     waveform = _as_waveform(samples)
     if not math.isfinite(snr_db):
         raise ValueError(f"SN比は有限値である必要がある: {snr_db}")
@@ -245,11 +260,12 @@ def add_noise(samples: np.ndarray, noise: np.ndarray, snr_db: float) -> np.ndarr
     noise_power = float(np.mean(np.square(fitted, dtype=np.float32), dtype=np.float32))
     if signal_power <= _EPSILON:
         # 無音に雑音を足すとSN比が定義できない。そのまま返す。
-        return waveform
+        return waveform, False
     if noise_power <= _EPSILON:
-        return waveform
+        return waveform, False
     scale = math.sqrt(signal_power / (noise_power * (10.0 ** (float(snr_db) / 10.0))))
-    return np.ascontiguousarray((waveform + np.float32(scale) * fitted).astype(np.float32))
+    noisy = np.ascontiguousarray((waveform + np.float32(scale) * fitted).astype(np.float32))
+    return noisy, True
 
 
 class ArrayNoiseSource:
@@ -353,6 +369,34 @@ class MusanNoiseSource:
 # 残響
 
 
+def _draw_room(
+    rng: np.random.Generator,
+    room_x_range: Sequence[float],
+    room_y_range: Sequence[float],
+    room_z_range: Sequence[float],
+    rt60_range: Sequence[float],
+) -> tuple[list[float], float]:
+    """部屋の寸法と残響時間を引く（``generate_rir`` と適用率の実測で共用）。"""
+    room_dim = [
+        _uniform(rng, room_x_range),
+        _uniform(rng, room_y_range),
+        _uniform(rng, room_z_range),
+    ]
+    rt60 = _uniform(rng, rt60_range)
+    return room_dim, rt60
+
+
+def _inverse_sabine(rt60: float, room_dim: Sequence[float]) -> tuple[float, int] | None:
+    """Sabine の式の逆算。その寸法で実現できない残響時間なら ``None``。"""
+    import pyroomacoustics as pra
+
+    try:
+        absorption, sabine_order = pra.inverse_sabine(rt60, list(room_dim))
+    except ValueError:
+        return None
+    return absorption, sabine_order
+
+
 def generate_rir(
     rng: np.random.Generator,
     *,
@@ -375,17 +419,12 @@ def generate_rir(
     """
     import pyroomacoustics as pra
 
-    room_dim = [
-        _uniform(rng, room_x_range),
-        _uniform(rng, room_y_range),
-        _uniform(rng, room_z_range),
-    ]
-    rt60 = _uniform(rng, rt60_range)
-    try:
-        absorption, sabine_order = pra.inverse_sabine(rt60, room_dim)
-    except ValueError:
+    room_dim, rt60 = _draw_room(rng, room_x_range, room_y_range, room_z_range, rt60_range)
+    sabine = _inverse_sabine(rt60, room_dim)
+    if sabine is None:
         # その寸法では実現できない残響時間（吸音率が1を超える）。無響に近い応答を返す。
         return np.array([1.0], dtype=np.float32)
+    absorption, sabine_order = sabine
 
     room = pra.ShoeBox(
         room_dim,
@@ -471,6 +510,20 @@ def band_limit(
         low_hz: これより下を削る。``0`` 以下なら低域は削らない。
         high_hz: これより上を削る。``None`` かナイキスト周波数以上なら高域は削らない。
     """
+    return _band_limit(
+        samples, low_hz=low_hz, high_hz=high_hz, sample_rate=sample_rate, order=order
+    )[0]
+
+
+def _band_limit(
+    samples: np.ndarray,
+    *,
+    low_hz: float,
+    high_hz: float | None,
+    sample_rate: int,
+    order: int,
+) -> tuple[np.ndarray, bool]:
+    """``band_limit`` の本体。2つ目の値は実際にフィルタを掛けたかどうか。"""
     from scipy import signal as scipy_signal
 
     waveform = _as_waveform(samples)
@@ -482,7 +535,7 @@ def band_limit(
     if use_high_pass and use_low_pass and low >= high:
         raise ValueError(f"通過帯域が空: low_hz={low}, high_hz={high}")
     if not use_high_pass and not use_low_pass:
-        return waveform
+        return waveform, False
 
     if use_high_pass and use_low_pass:
         sos = scipy_signal.butter(
@@ -495,9 +548,9 @@ def band_limit(
 
     padlen = 3 * (sos.shape[0] * 2)
     if waveform.size <= padlen:  # 短すぎて零位相フィルタが使えない
-        return waveform
+        return waveform, False
     filtered = scipy_signal.sosfiltfilt(sos, waveform.astype(np.float64))
-    return np.ascontiguousarray(filtered.astype(np.float32))
+    return np.ascontiguousarray(filtered.astype(np.float32)), True
 
 
 # --------------------------------------------------------------------------------------
@@ -525,6 +578,20 @@ def frequency_mask(
     Returns:
         入力とは別の配列（入力は書き換えない）。
     """
+    return _frequency_mask(
+        feature, rng, num_masks=num_masks, max_width=max_width, mask_value=mask_value
+    )[0]
+
+
+def _frequency_mask(
+    feature: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    num_masks: int,
+    max_width: int,
+    mask_value: float,
+) -> tuple[np.ndarray, bool]:
+    """``frequency_mask`` の本体。2つ目の値は幅1以上のマスクを1本でも掛けたかどうか。"""
     array = np.asarray(feature, dtype=np.float32)
     if array.ndim != 2:
         raise ValueError(f"(フレーム数, メル次元数) の2次元配列を渡すこと: ndim={array.ndim}")
@@ -533,14 +600,16 @@ def frequency_mask(
     masked = array.copy()
     n_mels = masked.shape[1]
     if n_mels == 0 or max_width == 0:
-        return masked
+        return masked, False
+    applied = False
     for _ in range(int(num_masks)):
         width = int(rng.integers(0, min(int(max_width), n_mels) + 1))
         if width == 0:
             continue
         start = int(rng.integers(0, n_mels - width + 1))
         masked[:, start : start + width] = np.float32(mask_value)
-    return masked
+        applied = True
+    return masked, applied
 
 
 # --------------------------------------------------------------------------------------
@@ -549,15 +618,22 @@ def frequency_mask(
 
 @dataclass(frozen=True)
 class AugmentConfig:
-    """各拡張の適用確率とパラメータ範囲（既定値は docs/decisions/006-augmentation.md）。"""
+    """各拡張の適用確率とパラメータ範囲（既定値は docs/decisions/006-augmentation.md）。
+
+    ``*_enabled`` は拡張ごとの有効・無効（既定はすべて有効）。``False`` の拡張は
+    確率やパラメータによらず適用しない。拡張を1種類だけ外す実験に使う
+    （docs/questions.md 2026-09-24 回答2）。
+    """
 
     sample_rate: int = SAMPLE_RATE
 
     # 時間伸縮（docs/spec.md「0.7〜1.5倍」）
+    time_stretch_enabled: bool = True
     time_stretch_prob: float = 0.5
     time_stretch_range: tuple[float, float] = (0.7, 1.5)
 
     # 残響（pyroomacoustics）
+    reverb_enabled: bool = True
     reverb_prob: float = 0.3
     rt60_range: tuple[float, float] = (0.1, 0.7)
     room_x_range: tuple[float, float] = (3.0, 10.0)
@@ -566,20 +642,24 @@ class AugmentConfig:
     reverb_max_order: int = 12
 
     # 雑音重畳（docs/spec.md「SNR0〜20dB」）
+    noise_enabled: bool = True
     noise_prob: float = 0.5
     snr_db_range: tuple[float, float] = (0.0, 20.0)
 
     # 帯域制限
+    band_limit_enabled: bool = True
     band_limit_prob: float = 0.25
     low_hz_range: tuple[float, float] = (0.0, 300.0)
     high_hz_range: tuple[float, float] = (3400.0, 7800.0)
     band_limit_order: int = 4
 
     # 音量変化
+    volume_enabled: bool = True
     volume_prob: float = 0.5
     gain_db_range: tuple[float, float] = (-12.0, 6.0)
 
     # 周波数方向のマスク（特徴量に適用。時間方向のマスクは禁止）
+    freq_mask_enabled: bool = True
     freq_mask_prob: float = 0.5
     freq_mask_num: int = 2
     freq_mask_max_width: int = 12
@@ -621,12 +701,18 @@ class AugmentResult:
 
     ``stretch`` 以外の拡張はラベルに影響しない。``stretch`` が影響するのは
     毎秒モーラ数だけで、モーラ数そのものは常に不変である。
+
+    ``applied`` は確率の抽選に当たった拡張、``effective`` はそのうち実際に波形を
+    変えた拡張である。``effective`` からは、伸縮率がちょうど1.0の時間伸縮、無響の応答に
+    なった残響、無音で雑音を足さなかった雑音重畳、フィルタを掛けなかった帯域制限、
+    利得0dBの音量変化を除く。
     """
 
     samples: np.ndarray
     stretch: float = 1.0
     applied: tuple[str, ...] = field(default_factory=tuple)
     params: dict[str, float] = field(default_factory=dict)
+    effective: tuple[str, ...] = field(default_factory=tuple)
 
     def mora_count(self, mora_count: float) -> float:
         """拡張後のモーラ数。**どの拡張でも不変**。"""
@@ -654,22 +740,26 @@ def augment_waveform(
     最後に録音利得がかかる）に合わせてある。
 
     ``noise_source`` を渡さない場合、雑音重畳は行わない（MUSAN が無い環境でも動く）。
+    個別の ``*_enabled`` が ``False`` の拡張は適用せず、その拡張の抽選も行わない。
 
     Returns:
         ``AugmentResult``。ラベルの読み替えは ``mora_count`` と ``mora_per_second`` を使う。
     """
     waveform = _as_waveform(samples)
     applied: list[str] = []
+    effective: list[str] = []
     params: dict[str, float] = {}
     stretch = 1.0
 
-    if rng.random() < config.time_stretch_prob:
+    if config.time_stretch_enabled and rng.random() < config.time_stretch_prob:
         stretch = _uniform(rng, config.time_stretch_range)
         waveform = time_stretch(waveform, stretch, sample_rate=config.sample_rate)
         applied.append("time_stretch")
+        if stretch != 1.0:
+            effective.append("time_stretch")
         params["stretch"] = stretch
 
-    if rng.random() < config.reverb_prob:
+    if config.reverb_enabled and rng.random() < config.reverb_prob:
         rir = generate_rir(
             rng,
             sample_rate=config.sample_rate,
@@ -681,18 +771,26 @@ def augment_waveform(
         )
         waveform = apply_reverb(waveform, rir)
         applied.append("reverb")
+        if rir.size > 1:  # [1.0] は無響の応答（実現できない組）
+            effective.append("reverb")
 
-    if noise_source is not None and rng.random() < config.noise_prob:
+    if (
+        config.noise_enabled
+        and noise_source is not None
+        and rng.random() < config.noise_prob
+    ):
         snr_db = _uniform(rng, config.snr_db_range)
         noise = noise_source.sample(waveform.size, rng)
-        waveform = add_noise(waveform, noise, snr_db)
+        waveform, noise_added = _add_noise(waveform, noise, snr_db)
         applied.append("noise")
+        if noise_added:
+            effective.append("noise")
         params["snr_db"] = snr_db
 
-    if rng.random() < config.band_limit_prob:
+    if config.band_limit_enabled and rng.random() < config.band_limit_prob:
         low_hz = _uniform(rng, config.low_hz_range)
         high_hz = _uniform(rng, config.high_hz_range)
-        waveform = band_limit(
+        waveform, filtered = _band_limit(
             waveform,
             low_hz=low_hz,
             high_hz=high_hz,
@@ -700,17 +798,25 @@ def augment_waveform(
             order=config.band_limit_order,
         )
         applied.append("band_limit")
+        if filtered:
+            effective.append("band_limit")
         params["low_hz"] = low_hz
         params["high_hz"] = high_hz
 
-    if rng.random() < config.volume_prob:
+    if config.volume_enabled and rng.random() < config.volume_prob:
         gain_db = _uniform(rng, config.gain_db_range)
         waveform = change_volume(waveform, gain_db)
         applied.append("volume")
+        if gain_db != 0.0:
+            effective.append("volume")
         params["gain_db"] = gain_db
 
     return AugmentResult(
-        samples=waveform, stretch=stretch, applied=tuple(applied), params=params
+        samples=waveform,
+        stretch=stretch,
+        applied=tuple(applied),
+        params=params,
+        effective=tuple(effective),
     )
 
 
@@ -721,15 +827,28 @@ def augment_feature(
     config: AugmentConfig = AugmentConfig(),
 ) -> np.ndarray:
     """特徴量に対する拡張（周波数方向のマスクのみ）。時間方向のマスクは行わない。"""
-    if rng.random() < config.freq_mask_prob:
-        return frequency_mask(
+    return augment_feature_with_status(feature, rng, config=config)[0]
+
+
+def augment_feature_with_status(
+    feature: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    config: AugmentConfig = AugmentConfig(),
+) -> tuple[np.ndarray, bool]:
+    """``augment_feature`` と同じ処理。2つ目の値は周波数マスクが実際に掛かったかどうか。
+
+    乱数の消費は ``augment_feature`` と同一である。
+    """
+    if config.freq_mask_enabled and rng.random() < config.freq_mask_prob:
+        return _frequency_mask(
             feature,
             rng,
             num_masks=config.freq_mask_num,
             max_width=config.freq_mask_max_width,
             mask_value=config.freq_mask_value,
         )
-    return np.asarray(feature, dtype=np.float32)
+    return np.asarray(feature, dtype=np.float32), False
 
 
 # --------------------------------------------------------------------------------------
@@ -743,27 +862,34 @@ class AugmentSetupError(ValueError):
     """
 
 
-#: (確率の項目名, 表示名)。適用順は ``augment_waveform`` と ``augment_feature`` に合わせる。
-_PROBABILITIES: tuple[tuple[str, str], ...] = (
-    ("time_stretch_prob", "時間伸縮"),
-    ("reverb_prob", "残響"),
-    ("noise_prob", "雑音重畳"),
-    ("band_limit_prob", "帯域制限"),
-    ("volume_prob", "音量変化"),
-    ("freq_mask_prob", "周波数マスク"),
+#: (拡張の名前, 表示名)。適用順は ``augment_waveform`` と ``augment_feature`` に合わせる。
+#: 個別の有効フラグは ``<名前>_enabled``、確率は ``<名前>_prob``。
+AUGMENTATIONS: tuple[tuple[str, str], ...] = (
+    ("time_stretch", "時間伸縮"),
+    ("reverb", "残響"),
+    ("noise", "雑音重畳"),
+    ("band_limit", "帯域制限"),
+    ("volume", "音量変化"),
+    ("freq_mask", "周波数マスク"),
 )
 
-_RANGES: tuple[str, ...] = (
-    "time_stretch_range",
-    "rt60_range",
-    "room_x_range",
-    "room_y_range",
-    "room_z_range",
-    "snr_db_range",
-    "low_hz_range",
-    "high_hz_range",
-    "gain_db_range",
-)
+#: 拡張ごとの範囲の項目。
+_RANGES: dict[str, tuple[str, ...]] = {
+    "time_stretch": ("time_stretch_range",),
+    "reverb": ("rt60_range", "room_x_range", "room_y_range", "room_z_range"),
+    "noise": ("snr_db_range",),
+    "band_limit": ("low_hz_range", "high_hz_range"),
+    "volume": ("gain_db_range",),
+    "freq_mask": (),
+}
+
+#: docs/spec.md「データ拡張」に範囲が書かれている項目と、その範囲（両端を含む）。
+#: 範囲を変える場合は先に docs/spec.md を更新する（docs/questions.md 2026-09-24 回答3）。
+#: spec.md に範囲が無い項目には制約を設けない。
+SPEC_RANGES: dict[str, tuple[float, float, str]] = {
+    "time_stretch_range": (0.7, 1.5, "時間伸縮0.7〜1.5倍"),
+    "snr_db_range": (0.0, 20.0, "雑音重畳SNR0〜20dB"),
+}
 
 # generate_rir の既定の margin（音源とマイクを壁から離す距離、メートル）。
 _RIR_MARGIN = 0.5
@@ -784,6 +910,8 @@ def _require_module(name: str, purpose: str) -> None:
 def validate_augment_config(config: AugmentConfig) -> None:
     """拡張ごとに「有効なのに実行されない」「途中で必ず失敗する」設定を検出する。
 
+    個別の ``*_enabled`` が ``False`` の拡張は適用しないので、その確率とパラメータは
+    検査しない（docs/questions.md 2026-09-24 回答2）。
     サンプル単位で起きる正当なスキップ（無音に雑音を足さない、音量の上限クリップなど）は
     ここでは扱わない。一覧は results/augment_validation.md。
 
@@ -795,23 +923,72 @@ def validate_augment_config(config: AugmentConfig) -> None:
             f"sample_rate={config.sample_rate} は docs/spec.md の入力（16kHz）と異なる"
         )
 
-    for key, label in _PROBABILITIES:
+    for name, label in AUGMENTATIONS:
+        flag = getattr(config, f"{name}_enabled")
+        if not isinstance(flag, (bool, np.bool_)):
+            raise AugmentSetupError(
+                f"{name}_enabled={flag!r} は true か false で書くこと"
+            )
+
+    enabled = {name: bool(getattr(config, f"{name}_enabled")) for name, _ in AUGMENTATIONS}
+    for name, label in AUGMENTATIONS:
+        if not enabled[name]:
+            continue
+        key = f"{name}_prob"
         prob = float(getattr(config, key))
         if not math.isfinite(prob) or prob < 0.0 or prob > 1.0:
             raise AugmentSetupError(f"{label}の確率 {key}={prob} は0より大きく1以下にすること")
         if prob == 0.0:
             raise AugmentSetupError(
                 f"拡張が有効なのに{label}の確率 {key}=0 で、{label}が一度も実行されない"
+                f"（外すなら {name}_enabled: false と書く）"
+            )
+        for range_key in _RANGES[name]:
+            low, high = (float(value) for value in getattr(config, range_key))
+            if not (math.isfinite(low) and math.isfinite(high)):
+                raise AugmentSetupError(
+                    f"{range_key}={getattr(config, range_key)} に有限でない値がある"
+                )
+            if low > high:
+                raise AugmentSetupError(
+                    f"{range_key}={getattr(config, range_key)} の下限が上限を超えている"
+                )
+
+    if enabled["time_stretch"]:
+        _validate_time_stretch(config)
+    if enabled["reverb"]:
+        _validate_reverb(config)
+    if enabled["band_limit"]:
+        _validate_band_limit(config)
+    if enabled["volume"]:
+        # 音量変化
+        if tuple(float(value) for value in config.gain_db_range) == (0.0, 0.0):
+            raise AugmentSetupError("gain_db_range=(0.0, 0.0) で音量変化が常に無変化になる")
+    if enabled["freq_mask"]:
+        # 周波数マスク
+        if int(config.freq_mask_num) <= 0 or int(config.freq_mask_max_width) <= 0:
+            raise AugmentSetupError(
+                f"freq_mask_num={config.freq_mask_num}・freq_mask_max_width="
+                f"{config.freq_mask_max_width} では周波数マスクが常に無変化になる"
             )
 
-    for key in _RANGES:
-        low, high = (float(value) for value in getattr(config, key))
-        if not (math.isfinite(low) and math.isfinite(high)):
-            raise AugmentSetupError(f"{key}={getattr(config, key)} に有限でない値がある")
-        if low > high:
-            raise AugmentSetupError(f"{key}={getattr(config, key)} の下限が上限を超えている")
+    # docs/spec.md に範囲が書かれている項目（上の検査を通った後に確かめる）
+    for name, _ in AUGMENTATIONS:
+        if not enabled[name]:
+            continue
+        for range_key in _RANGES[name]:
+            if range_key not in SPEC_RANGES:
+                continue
+            spec_low, spec_high, spec_text = SPEC_RANGES[range_key]
+            low, high = (float(value) for value in getattr(config, range_key))
+            if low < spec_low or high > spec_high:
+                raise AugmentSetupError(
+                    f"{range_key}={getattr(config, range_key)} は docs/spec.md の範囲"
+                    f"（{spec_text}）の外にある。範囲を変えるなら先に docs/spec.md を更新する"
+                )
 
-    # 時間伸縮
+
+def _validate_time_stretch(config: AugmentConfig) -> None:
     low, high = config.time_stretch_range
     if low <= 0.0:
         raise AugmentSetupError(f"time_stretch_range={config.time_stretch_range} は正の値にすること")
@@ -821,9 +998,10 @@ def validate_augment_config(config: AugmentConfig) -> None:
         )
     _require_module("librosa", "時間伸縮")
 
-    # 残響
+
+def _validate_reverb(config: AugmentConfig) -> None:
     _require_module("pyroomacoustics", "残響")
-    _require_module("scipy", "残響と帯域制限")
+    _require_module("scipy", "残響")
     if config.rt60_range[0] <= 0.0:
         raise AugmentSetupError(f"rt60_range={config.rt60_range} は正の値にすること")
     for key in ("room_x_range", "room_y_range", "room_z_range"):
@@ -853,7 +1031,9 @@ def validate_augment_config(config: AugmentConfig) -> None:
             f"残響が常に無響の応答に置き換わる（{error}）"
         ) from error
 
-    # 帯域制限
+
+def _validate_band_limit(config: AugmentConfig) -> None:
+    _require_module("scipy", "帯域制限")
     nyquist = float(config.sample_rate) / 2.0
     high_pass_possible = float(config.low_hz_range[1]) > 0.0
     low_pass_possible = float(config.high_hz_range[0]) < nyquist
@@ -874,28 +1054,21 @@ def validate_augment_config(config: AugmentConfig) -> None:
     if int(config.band_limit_order) < 1:
         raise AugmentSetupError(f"band_limit_order={config.band_limit_order} は1以上にすること")
 
-    # 音量変化
-    if tuple(float(value) for value in config.gain_db_range) == (0.0, 0.0):
-        raise AugmentSetupError("gain_db_range=(0.0, 0.0) で音量変化が常に無変化になる")
-
-    # 周波数マスク
-    if int(config.freq_mask_num) <= 0 or int(config.freq_mask_max_width) <= 0:
-        raise AugmentSetupError(
-            f"freq_mask_num={config.freq_mask_num}・freq_mask_max_width="
-            f"{config.freq_mask_max_width} では周波数マスクが常に無変化になる"
-        )
-
 
 def describe_augment_config(
     config: AugmentConfig, *, noise_description: str
 ) -> list[str]:
-    """学習ログの先頭に書く、有効な拡張の一覧（1拡張1行）。"""
+    """学習ログの先頭に書く、拡張の一覧（1拡張1行）。
+
+    個別に無効（``*_enabled=False``）の拡張は ``拡張: <名前> 無効（<名前>_enabled=false）``
+    の1行にする。
+    """
 
     def span(key: str, fmt: str = "{:g}") -> str:
         low, high = getattr(config, key)
         return f"{fmt.format(low)}〜{fmt.format(high)}"
 
-    return [
+    lines = [
         "拡張=あり 適用順=時間伸縮→残響→雑音重畳→帯域制限→音量変化（波形）→周波数マスク（特徴量）",
         f"拡張: 時間伸縮 確率={config.time_stretch_prob:g} 伸縮率={span('time_stretch_range')}倍",
         f"拡張: 残響 確率={config.reverb_prob:g} RT60={span('rt60_range')}秒 "
@@ -909,3 +1082,143 @@ def describe_augment_config(
         f"拡張: 周波数マスク 確率={config.freq_mask_prob:g} 本数={config.freq_mask_num} "
         f"最大幅={config.freq_mask_max_width}メル 埋める値={config.freq_mask_value:g}",
     ]
+    for index, (name, label) in enumerate(AUGMENTATIONS, start=1):
+        if not getattr(config, f"{name}_enabled"):
+            lines[index] = f"拡張: {label} 無効（{name}_enabled=false）"
+    return lines
+
+
+# --------------------------------------------------------------------------------------
+# 設計上の確率と実際の適用率（docs/questions.md 2026-09-24 回答4）
+
+#: 適用率を実測するときの既定の抽選回数と乱数の種。
+APPLICATION_RATE_TRIALS = 2000
+APPLICATION_RATE_SEED = 0
+# 周波数マスクの幅を引くときのメル次元数（docs/spec.md「n_mels=80」）。
+_N_MELS = 80
+
+
+@dataclass(frozen=True)
+class ApplicationRate:
+    """1種類の拡張の、設計上の確率と実際の適用率。"""
+
+    name: str
+    label: str
+    designed: float
+    selected: int  # 確率の抽選に当たった回数
+    applied: int  # そのうち実際に掛かった回数
+    trials: int
+
+    @property
+    def actual(self) -> float:
+        return self.applied / self.trials if self.trials else 0.0
+
+
+def estimate_application_rates(
+    config: AugmentConfig,
+    *,
+    noise_available: bool = True,
+    num_trials: int = APPLICATION_RATE_TRIALS,
+    seed: int = APPLICATION_RATE_SEED,
+    n_mels: int = _N_MELS,
+) -> list[ApplicationRate]:
+    """``config`` に従って抽選とパラメータ生成だけを ``num_trials`` 回行い、適用率を実測する。
+
+    波形は処理しない（2000回で1秒未満）。「実際には適用されなかった」と数えるのは、
+    パラメータだけで決まる次の場合である。
+
+    - 時間伸縮: 引いた伸縮率がちょうど1.0
+    - 残響: 引いた部屋の寸法と RT60 の組が実現できず、無響の応答 ``[1.0]`` になる
+    - 雑音重畳: 雑音源が無い（``noise_available=False``）
+    - 帯域制限: 引いた低域遮断が0以下かつ高域遮断がナイキスト周波数以上
+    - 音量変化: 引いた利得がちょうど0dB
+    - 周波数マスク: どのマスクの幅も0
+
+    波形に依存するスキップ（無音の区間に雑音を足さない、音量の上限クリップ）は数えない。
+
+    Returns:
+        ``AUGMENTATIONS`` の順の ``ApplicationRate``。設計上の確率は、個別に無効な拡張と
+        雑音源の無い雑音重畳では0とする。
+    """
+    if num_trials < 1:
+        raise ValueError(f"抽選回数は1以上: {num_trials}")
+    rng = np.random.default_rng(seed)
+    nyquist = float(config.sample_rate) / 2.0
+    enabled = {
+        "time_stretch": bool(config.time_stretch_enabled),
+        "reverb": bool(config.reverb_enabled),
+        "noise": bool(config.noise_enabled) and noise_available,
+        "band_limit": bool(config.band_limit_enabled),
+        "volume": bool(config.volume_enabled),
+        "freq_mask": bool(config.freq_mask_enabled),
+    }
+    counts = {name: 0 for name, _ in AUGMENTATIONS}
+    selected = {name: 0 for name, _ in AUGMENTATIONS}
+    for _ in range(int(num_trials)):
+        if enabled["time_stretch"] and rng.random() < config.time_stretch_prob:
+            selected["time_stretch"] += 1
+            if _uniform(rng, config.time_stretch_range) != 1.0:
+                counts["time_stretch"] += 1
+        if enabled["reverb"] and rng.random() < config.reverb_prob:
+            selected["reverb"] += 1
+            room_dim, rt60 = _draw_room(
+                rng,
+                config.room_x_range,
+                config.room_y_range,
+                config.room_z_range,
+                config.rt60_range,
+            )
+            if _inverse_sabine(rt60, room_dim) is not None:
+                counts["reverb"] += 1
+        if enabled["noise"] and rng.random() < config.noise_prob:
+            selected["noise"] += 1
+            _uniform(rng, config.snr_db_range)
+            counts["noise"] += 1
+        if enabled["band_limit"] and rng.random() < config.band_limit_prob:
+            selected["band_limit"] += 1
+            low_hz = _uniform(rng, config.low_hz_range)
+            high_hz = _uniform(rng, config.high_hz_range)
+            if low_hz > 0.0 or high_hz < nyquist:
+                counts["band_limit"] += 1
+        if enabled["volume"] and rng.random() < config.volume_prob:
+            selected["volume"] += 1
+            if _uniform(rng, config.gain_db_range) != 0.0:
+                counts["volume"] += 1
+        if enabled["freq_mask"] and rng.random() < config.freq_mask_prob:
+            selected["freq_mask"] += 1
+            widest = min(int(config.freq_mask_max_width), int(n_mels))
+            widths = [
+                int(rng.integers(0, widest + 1)) if widest > 0 else 0
+                for _ in range(max(int(config.freq_mask_num), 0))
+            ]
+            if any(width > 0 for width in widths):
+                counts["freq_mask"] += 1
+    return [
+        ApplicationRate(
+            name=name,
+            label=label,
+            designed=float(getattr(config, f"{name}_prob")) if enabled[name] else 0.0,
+            selected=selected[name],
+            applied=counts[name],
+            trials=int(num_trials),
+        )
+        for name, label in AUGMENTATIONS
+    ]
+
+
+def describe_application_rates(
+    rates: Sequence[ApplicationRate], *, seed: int = APPLICATION_RATE_SEED
+) -> list[str]:
+    """学習ログに書く、設計上の確率と実際の適用率の行（1拡張1行）。"""
+    trials = rates[0].trials if rates else 0
+    lines = [
+        f"拡張の適用率（学習開始前に固定シード{seed}で{trials}回抽選・パラメータ生成）: "
+        "設計=設定上の確率 実際=実際に掛かった割合（残響の無響の組などは適用なしと数える。"
+        "無音への雑音・音量の上限クリップなど波形に依存するスキップは含まない）"
+    ]
+    for rate in rates:
+        lines.append(
+            f"適用率: {rate.label} 設計={rate.designed:.3f} 実際={rate.actual:.3f}"
+            f"（抽選に当たった{rate.selected}回のうち{rate.applied}回が実際に掛かった／{rate.trials}回）"
+        )
+    return lines
