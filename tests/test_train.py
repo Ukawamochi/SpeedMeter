@@ -776,3 +776,57 @@ def test_timing_columns_are_written(tmp_path: Path) -> None:
     log = _log_text(outcome)
     assert "所要時間: 全体=" in log and "データ待ち=" in log and "dev評価=" in log
     assert "データ読み込み律速" in log
+
+
+# --------------------------------------------------------------------------------------
+# エポックごとの個別チェックポイント保存（train.save_every_epoch）
+
+
+def test_save_every_epoch_defaults_to_true() -> None:
+    config = TrainConfig.from_mapping({"experiment_id": "x", "train": {"epochs": 6}})
+    assert config.train.save_every_epoch is True
+
+
+def test_save_every_epoch_writes_one_checkpoint_per_epoch(tmp_path: Path) -> None:
+    _, outcome = _run_with(
+        tmp_path, "everyep", train={"max_epochs": 4, "save_every_epoch": True}
+    )
+    checkpoints_dir = outcome.run_dir / "checkpoints"
+    files = sorted(p.name for p in checkpoints_dir.glob("epoch_*.pt"))
+    assert files == ["epoch_001.pt", "epoch_002.pt", "epoch_003.pt", "epoch_004.pt"]
+
+    # checkpoint_last.pt / checkpoint_best.pt の既存の保存は変わらず行われる。
+    assert (outcome.run_dir / "checkpoint_last.pt").is_file()
+    assert (outcome.run_dir / "checkpoint_best.pt").is_file()
+
+    # 保存の中身は save_checkpoint の既定形式（model_state, model_config, epoch,
+    # metrics, train_config）に合わせる。checkpoint_best.pt と同様に optimizer_state は
+    # 含まない。
+    model, payload = load_checkpoint(checkpoints_dir / "epoch_003.pt")
+    assert payload["epoch"] == 3
+    assert payload["metrics"]["epoch"] == 3
+    assert payload["train_config"]["experiment_id"] == "everyep"
+    assert "model_config" in payload
+    assert "optimizer_state" not in payload
+    assert isinstance(model, SpeechRateCNN)
+
+    # 各エポックの中身がそのエポックの記録と一致すること（上書きではなく個別に保存されている）。
+    rows = [
+        json.loads(line)
+        for line in (outcome.run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    for row in rows:
+        _, epoch_payload = load_checkpoint(checkpoints_dir / f"epoch_{row['epoch']:03d}.pt")
+        assert epoch_payload["metrics"]["mae_moras_per_sec"] == pytest.approx(
+            row["mae_moras_per_sec"]
+        )
+
+
+def test_save_every_epoch_false_skips_individual_checkpoints(tmp_path: Path) -> None:
+    _, outcome = _run_with(
+        tmp_path, "noeveryep", train={"max_epochs": 3, "save_every_epoch": False}
+    )
+    assert not (outcome.run_dir / "checkpoints").exists()
+    # 既存の保存には影響しない。
+    assert (outcome.run_dir / "checkpoint_last.pt").is_file()
+    assert (outcome.run_dir / "checkpoint_best.pt").is_file()

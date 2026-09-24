@@ -16,6 +16,7 @@ docs/decisions/005-window-strategy.md の方式Aで学習する。1件の入力�
 | ``metrics.jsonl`` | エポックごとに1行。検証セットの全指標と学習損失 |
 | ``config_snapshot.yaml`` | gitのコミットハッシュ、設定ファイルの内容、解決後の設定、モデルの要約、乱数シード |
 | ``checkpoint_best.pt`` / ``checkpoint_last.pt`` | 最良と最新のチェックポイント |
+| ``checkpoints/epoch_{epoch:03d}.pt`` | エポックごとの個別チェックポイント（``train.save_every_epoch``、既定有効） |
 
 ## 損失の切り替え（docs/spec.md「損失: 二乗誤差とポアソン損失を比較する」）
 
@@ -64,6 +65,19 @@ exp001・exp002 の挙動は変わらない）。監視する指標は ``train.b
 終了理由は ``early_stopping``（早期終了）か ``max_epochs``（上限到達）で、到達エポック・
 最良エポックとともに ``log.txt`` の最後と ``run_summary.json`` に書く。
 ``metrics.jsonl`` の各行にも ``epochs_without_improvement`` を残す。
+
+## エポックごとの個別チェックポイント保存
+
+``train.save_every_epoch``（既定 ``True``）が有効なら、各エポックの検証と
+``checkpoint_last.pt`` / ``checkpoint_best.pt`` の更新に加えて、
+``run_dir / "checkpoints" / f"epoch_{epoch:03d}.pt"`` にそのエポックのチェックポイントを
+個別に保存する。保存する中身は ``checkpoint_best.pt`` と同じ形式（``save_checkpoint`` の
+既定どおり、``optimizer_state`` は含まない）。目的は、学習後に「全体MAEが最小のエポック」
+と「特定の話速帯のMAEが最小のエポック」が異なる場合に、どちらのエポックのチェックポイントも
+後から選び直せるようにすること（``checkpoint_best.pt`` は上書き保存のため、
+``train.best_metric`` 以外の基準で最良だったエポックのチェックポイントは残らない）。
+``False`` にすると個別保存を行わず、従来どおり ``checkpoint_last.pt`` /
+``checkpoint_best.pt`` のみを保存する。
 
 ## チェックポイントからの再開
 
@@ -332,6 +346,10 @@ class TrainSettings:
         log_interval: 学習中に損失を書き出す間隔（バッチ数）。
         record_metrics_csv: 学習の最後に results/metrics.csv へ1行追記するか。
         metrics_csv: 追記先。
+        save_every_epoch: 各エポックの終わりに ``run_dir/checkpoints/epoch_{epoch:03d}.pt``
+            へ個別にチェックポイントを保存するか。既定 ``True``。``checkpoint_last.pt`` /
+            ``checkpoint_best.pt`` の保存とは独立（docstring「エポックごとの個別
+            チェックポイント保存」を参照）。
     """
 
     epochs: int = 10
@@ -351,6 +369,7 @@ class TrainSettings:
     log_interval: int = 50
     record_metrics_csv: bool = False
     metrics_csv: str = "results/metrics.csv"
+    save_every_epoch: bool = True
 
     @classmethod
     def from_mapping(cls, mapping: dict[str, Any] | None) -> "TrainSettings":
@@ -1615,6 +1634,15 @@ def run_training(
                 optimizer=optimizer,
                 normalizer=normalizer,
             )
+            if config.train.save_every_epoch:
+                save_checkpoint(
+                    run_dir / "checkpoints" / f"epoch_{epoch:03d}.pt",
+                    model,
+                    epoch=epoch,
+                    metrics=row,
+                    config=config,
+                    normalizer=normalizer,
+                )
             if is_best:
                 best_value = float(value)
                 best_epoch = epoch
