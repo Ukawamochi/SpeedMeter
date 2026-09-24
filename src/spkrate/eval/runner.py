@@ -47,6 +47,23 @@ noisy の行の ``config_path`` は「実験の設定;dev_noisy の設定」の�
 つなぐ（``noisy_config_path``）。noisy の指標はモデルの設定と雑音条件の設定の両方で決まるため。
 1推論あたりの処理時間とモデルサイズは入力に依存しないので、noisy の行にも clean の行と
 同じ値（clean の評価で測った値）を書く。
+
+## 推論時間の列（旧方式と新方式）
+
+推論時間の測定規則は docs/decisions/007-latency-measurement.md による。
+
+- ``latency_ms_per_inference``: 旧方式。精度評価の入口（``scripts/eval_dev_full.py`` など）が
+  モデルごとに別プロセスで測った**平均**。行ごとに測定条件（プロセス・時刻・機械の状態）が
+  異なるため、モデル間の比較には使わない。値は残す
+- ``latency_session_id`` / ``latency_ms_median`` / ``latency_ms_max``: 新方式
+  （``spkrate.eval.latency``、``scripts/measure_latency.py``）。比較する全モデルを同一プロセス内で
+  連続して測った中央値と最大値。同一セッションで測った行は同じ ``latency_session_id`` を持つ。
+  **モデル間の推論時間の比較には、同じ ``latency_session_id`` の行の新方式の値だけを使う**
+  （``spkrate.eval.latency.compare_latency`` はセッションが異なる値を並べるとエラーにする）
+
+新方式の列は既存の列の後ろ（末尾）に足した。列を足す前の csv（ヘッダが
+``LEGACY_METRICS_CSV_COLUMNS``）には ``append_metrics_row`` は追記せず ``ValueError`` とする。
+``upgrade_metrics_csv`` で列を足してから追記する（既存行の値は文字列のまま保ち、新しい列は空欄）。
 """
 
 from __future__ import annotations
@@ -73,6 +90,8 @@ __all__ = [
     "EvalSegment",
     "EvaluationResult",
     "Estimator",
+    "LATENCY_COLUMNS",
+    "LEGACY_METRICS_CSV_COLUMNS",
     "METRICS_CSV_COLUMNS",
     "MetricsRow",
     "append_metrics_row",
@@ -88,6 +107,7 @@ __all__ = [
     "run_and_record",
     "run_and_record_clean_and_noisy",
     "segments_from_clip_records",
+    "upgrade_metrics_csv",
 ]
 
 DEFAULT_METRICS_CSV = Path("results/metrics.csv")
@@ -106,8 +126,15 @@ def noisy_config_path(experiment_config: str, noisy_config: str) -> str:
     """noisy の行の ``config_path``（実験の設定と dev_noisy の設定を ``;`` でつなぐ）。"""
     return f"{experiment_config};{noisy_config}"
 
-# metrics.csv の列順（固定）。指標列は METRIC_COLUMNS をそのまま展開する。
-METRICS_CSV_COLUMNS: tuple[str, ...] = (
+# 推論時間の新方式の列（モジュール docstring「推論時間の列」）。既存の列の後ろに足す。
+LATENCY_COLUMNS: tuple[str, ...] = (
+    "latency_session_id",
+    "latency_ms_median",
+    "latency_ms_max",
+)
+
+# 新方式の列を足す前の列順。``upgrade_metrics_csv`` がこのヘッダの csv を移行する。
+LEGACY_METRICS_CSV_COLUMNS: tuple[str, ...] = (
     "experiment_id",
     "timestamp",
     "commit_hash",
@@ -119,6 +146,9 @@ METRICS_CSV_COLUMNS: tuple[str, ...] = (
     "latency_ms_per_inference",
     "model_size_bytes",
 )
+
+# metrics.csv の列順（固定）。指標列は METRIC_COLUMNS をそのまま展開する。
+METRICS_CSV_COLUMNS: tuple[str, ...] = (*LEGACY_METRICS_CSV_COLUMNS, *LATENCY_COLUMNS)
 
 
 class Estimator(Protocol):
@@ -184,7 +214,11 @@ class CommitInfo:
 
 @dataclass(frozen=True)
 class MetricsRow:
-    """metrics.csv の1行分。``as_row`` のキー順は METRICS_CSV_COLUMNS に従う。"""
+    """metrics.csv の1行分。``as_row`` のキー順は METRICS_CSV_COLUMNS に従う。
+
+    ``latency_ms_per_inference`` は旧方式の平均（比較には使わない）。新方式の列
+    （``latency_session_id`` など）は精度評価の行では通常 None（空欄）である。
+    """
 
     experiment_id: str
     method: str
@@ -195,6 +229,9 @@ class MetricsRow:
     model_size_bytes: int | None = None
     commit: CommitInfo | None = None
     timestamp: str | None = None
+    latency_session_id: str | None = None
+    latency_ms_median: float | None = None
+    latency_ms_max: float | None = None
 
     def as_row(self) -> dict[str, object]:
         commit = self.commit or git_commit_info()
@@ -208,6 +245,9 @@ class MetricsRow:
             "split": self.split,
             "latency_ms_per_inference": self.latency_ms_per_inference,
             "model_size_bytes": "" if self.model_size_bytes is None else self.model_size_bytes,
+            "latency_session_id": self.latency_session_id or "",
+            "latency_ms_median": "" if self.latency_ms_median is None else self.latency_ms_median,
+            "latency_ms_max": "" if self.latency_ms_max is None else self.latency_ms_max,
         }
         row.update(self.metrics.as_dict())
         return {column: row[column] for column in METRICS_CSV_COLUMNS}
@@ -404,7 +444,8 @@ def append_metrics_row(
     """metrics.csv に1行追記する。ヘッダが無ければ書く。
 
     既存ファイルのヘッダが ``METRICS_CSV_COLUMNS`` と異なる場合は ``ValueError``。
-    列がずれた行が混ざるのを防ぐため、黙って合わせることはしない。
+    列がずれた行が混ざるのを防ぐため、黙って合わせることはしない。新方式の推論時間の列を
+    足す前の csv（``LEGACY_METRICS_CSV_COLUMNS``）は、先に ``upgrade_metrics_csv`` で移行する。
     """
     values = row.as_row() if isinstance(row, MetricsRow) else dict(row)
     missing = [column for column in METRICS_CSV_COLUMNS if column not in values]
@@ -420,6 +461,11 @@ def append_metrics_row(
     if exists:
         with path.open(encoding="utf-8", newline="") as handle:
             header = next(csv.reader(handle), [])
+        if tuple(header) == LEGACY_METRICS_CSV_COLUMNS:
+            raise ValueError(
+                "metrics.csv が推論時間の新方式の列を足す前の形式である。"
+                f"先に upgrade_metrics_csv({str(path)!r}) で列を足すこと"
+            )
         if tuple(header) != METRICS_CSV_COLUMNS:
             raise ValueError(
                 "metrics.csv のヘッダが想定と異なる。"
@@ -431,6 +477,50 @@ def append_metrics_row(
             writer.writeheader()
         writer.writerow({key: _format_value(value) for key, value in values.items()})
     return path
+
+
+def upgrade_metrics_csv(csv_path: str | Path = DEFAULT_METRICS_CSV) -> bool:
+    """列を足す前の metrics.csv に新方式の推論時間の列（``LATENCY_COLUMNS``）を足す。
+
+    既存の列の順と値は変えない。各行の行末の直前に空欄の列（``,`` を列数分）を足すだけで、
+    引用符・行末の種類（``\\n`` と ``\\r\\n`` が混在していても行ごとに）もそのまま残す。
+    ヘッダ行だけは新しい列名を足す。
+
+    Returns:
+        列を足したら True、既に新しい列構成なら False。
+
+    Raises:
+        ValueError: ヘッダが旧・新どちらの列構成とも一致しない場合、列数がヘッダと合わない
+            行がある場合、または値の中に改行を含む行がある場合（行単位で足せないため）。
+            いずれもファイルは変更しない。
+    """
+    path = Path(csv_path)
+    with path.open(encoding="utf-8", newline="") as handle:
+        text = handle.read()
+    rows = list(csv.reader(text.splitlines(keepends=True)))
+    header = tuple(rows[0]) if rows else ()
+    if header == METRICS_CSV_COLUMNS:
+        return False
+    if header != LEGACY_METRICS_CSV_COLUMNS:
+        raise ValueError(f"metrics.csv のヘッダが旧・新どちらの列構成とも一致しない: {list(header)}")
+    lines = text.splitlines(keepends=True)
+    if len(lines) != len(rows):
+        raise ValueError("値の中に改行を含む行があり、行単位で列を足せない")
+    broken = [index for index, row in enumerate(rows[1:], start=2) if len(row) != len(header)]
+    if broken:
+        raise ValueError(f"列数がヘッダと合わない行がある（行番号）: {broken}")
+
+    def extend(line: str, suffix: str) -> str:
+        body = line.rstrip("\r\n")
+        return body + suffix + line[len(body):]
+
+    out = [extend(lines[0], "," + ",".join(LATENCY_COLUMNS))]
+    out.extend(extend(line, "," * len(LATENCY_COLUMNS)) for line in lines[1:])
+    temporary = path.with_name(path.name + ".upgrading")
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        handle.write("".join(out))
+    temporary.replace(path)
+    return True
 
 
 def run_and_record(

@@ -15,6 +15,8 @@ import soundfile as sf
 from spkrate.eval.audio import TARGET_SAMPLE_RATE, load_audio, resample, to_mono
 from spkrate.eval.metrics import compute_metrics
 from spkrate.eval.runner import (
+    LATENCY_COLUMNS,
+    LEGACY_METRICS_CSV_COLUMNS,
     METRICS_CSV_COLUMNS,
     CommitInfo,
     EvalSegment,
@@ -26,6 +28,7 @@ from spkrate.eval.runner import (
     load_eval_client_ids,
     model_size_bytes,
     run_and_record,
+    upgrade_metrics_csv,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -210,6 +213,120 @@ def test_append_rejects_missing_or_unknown_columns(tmp_path):
     with pytest.raises(ValueError):
         append_metrics_row(full, csv_path=csv_path)
     assert not csv_path.exists()
+
+
+# --- 推論時間の新方式の列（latency_session_id など） -----------------------------
+
+
+def test_latency_columns_are_appended_after_legacy_columns():
+    assert METRICS_CSV_COLUMNS[: len(LEGACY_METRICS_CSV_COLUMNS)] == LEGACY_METRICS_CSV_COLUMNS
+    assert METRICS_CSV_COLUMNS[len(LEGACY_METRICS_CSV_COLUMNS):] == LATENCY_COLUMNS
+    assert LATENCY_COLUMNS == ("latency_session_id", "latency_ms_median", "latency_ms_max")
+
+
+def test_accuracy_row_leaves_latency_session_columns_empty(tmp_path):
+    csv_path = tmp_path / "metrics.csv"
+    append_metrics_row(_row(), csv_path=csv_path)
+    with csv_path.open(encoding="utf-8", newline="") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["latency_ms_per_inference"] == "1.25"
+    assert row["latency_session_id"] == ""
+    assert row["latency_ms_median"] == ""
+    assert row["latency_ms_max"] == ""
+
+
+def _write_legacy_csv(path: Path) -> list[list[str]]:
+    """列を足す前の形式の csv を、既存の書き方（csv モジュールの既定）で書く。"""
+    rows = [
+        ["001-a", "2026-09-21T00:39:21+09:00", "abc", "clean", "configs/a.yaml",
+         "envelope (音量包絡, 帯域通過)", "dev", *["0.5"] * (len(LEGACY_METRICS_CSV_COLUMNS) - 9),
+         "0.4156061607290245", ""],
+        ["002-b", "2026-09-22T00:00:00+09:00", "def", "dirty", "configs/b.yaml;configs/c.yaml",
+         "cnn", "dev_noisy_all", *[""] * (len(LEGACY_METRICS_CSV_COLUMNS) - 9),
+         "1.7455354149569757", "2005357"],
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(LEGACY_METRICS_CSV_COLUMNS)
+        writer.writerows(rows)
+    return rows
+
+
+def test_upgrade_metrics_csv_keeps_existing_rows(tmp_path):
+    csv_path = tmp_path / "metrics.csv"
+    legacy_rows = _write_legacy_csv(csv_path)
+    before = csv_path.read_bytes()
+
+    assert upgrade_metrics_csv(csv_path) is True
+    with csv_path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.reader(handle))
+    assert tuple(rows[0]) == METRICS_CSV_COLUMNS
+    assert len(rows) == 1 + len(legacy_rows)
+    for old, new in zip(legacy_rows, rows[1:]):
+        assert new[: len(old)] == old  # 既存の列の値は文字列のまま
+        assert new[len(old):] == [""] * len(LATENCY_COLUMNS)  # 新しい列は空欄
+    # 既存行の各行は「元の行 + 空欄の列」になっている（引用符・行末も変わらない）。
+    old_lines = before.splitlines(keepends=True)
+    new_lines = csv_path.read_bytes().splitlines(keepends=True)
+    assert len(new_lines) == len(old_lines)
+    for old_line, new_line in zip(old_lines[1:], new_lines[1:]):
+        body = old_line.rstrip(b"\r\n")
+        assert new_line == body + b"," * len(LATENCY_COLUMNS) + old_line[len(body):]
+
+    # 2回目は何もしない。移行後は追記できる。
+    assert upgrade_metrics_csv(csv_path) is False
+    append_metrics_row(_row("003-c"), csv_path=csv_path)
+    with csv_path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.reader(handle))
+    assert [r[0] for r in rows[1:]] == ["001-a", "002-b", "003-c"]
+
+
+def test_upgrade_metrics_csv_keeps_mixed_line_endings(tmp_path):
+    """行末が \\n と \\r\\n で混在していても行ごとの行末を保つ（本物の csv がそうである）。"""
+    csv_path = tmp_path / "metrics.csv"
+    _write_legacy_csv(csv_path)
+    raw = csv_path.read_bytes().split(b"\r\n")
+    mixed = raw[0] + b"\n" + raw[1] + b"\n" + raw[2] + b"\r\n"
+    csv_path.write_bytes(mixed)
+    assert upgrade_metrics_csv(csv_path) is True
+    lines = csv_path.read_bytes().splitlines(keepends=True)
+    assert [line.endswith(b"\r\n") for line in lines] == [False, False, True]
+    assert lines[1] == raw[1] + b",,,\n"
+    assert lines[0].endswith(b",latency_session_id,latency_ms_median,latency_ms_max\n")
+
+
+def test_append_to_legacy_csv_is_refused_until_upgraded(tmp_path):
+    csv_path = tmp_path / "metrics.csv"
+    _write_legacy_csv(csv_path)
+    before = csv_path.read_bytes()
+    with pytest.raises(ValueError, match="upgrade_metrics_csv"):
+        append_metrics_row(_row(), csv_path=csv_path)
+    assert csv_path.read_bytes() == before
+
+
+def test_upgrade_metrics_csv_rejects_unknown_header_and_broken_rows(tmp_path):
+    csv_path = tmp_path / "metrics.csv"
+    csv_path.write_text("experiment_id,timestamp\r\nx,y\r\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        upgrade_metrics_csv(csv_path)
+
+    broken = tmp_path / "broken.csv"
+    _write_legacy_csv(broken)
+    with broken.open("a", encoding="utf-8", newline="") as handle:
+        handle.write("only,two\r\n")
+    before = broken.read_bytes()
+    with pytest.raises(ValueError, match="列数"):
+        upgrade_metrics_csv(broken)
+    assert broken.read_bytes() == before
+
+    multiline = tmp_path / "multiline.csv"
+    _write_legacy_csv(multiline)
+    with multiline.open("a", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerow(["改行\nを含む", *[""] * (len(LEGACY_METRICS_CSV_COLUMNS) - 1)])
+    before = multiline.read_bytes()
+    with pytest.raises(ValueError, match="改行"):
+        upgrade_metrics_csv(multiline)
+    assert multiline.read_bytes() == before
 
 
 def test_run_and_record_appends_one_row(tmp_path):
