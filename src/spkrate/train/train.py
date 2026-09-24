@@ -724,11 +724,22 @@ def check_augment_setup(
             "data.source を waveform にすること"
         )
 
-    musan_root = config.augment.musan_root
+    augment_config = config.augment.build()
+    assert augment_config is not None
+    validate_augment_config(augment_config)
+    noise_description = "（使わない）"
+    if augment_config.noise_enabled:
+        noise_description = _check_musan(config.augment.musan_root)
+    return describe_augment_config(augment_config, noise_description=noise_description)
+
+
+def _check_musan(musan_root: str | None) -> str:
+    """雑音重畳が有効なときの雑音源の検査。ログに書く雑音源の説明を返す。"""
     if not musan_root:
         raise AugmentSetupError(
             "augment.enabled=true だが augment.musan_root が未設定で、雑音重畳が一度も"
             "行われない。MUSAN の配置先（data/DATASETS.md、通常は data/musan）を書くこと"
+            "（雑音重畳を外すなら augment.params に noise_enabled: false と書く）"
         )
     if not Path(musan_root).is_dir():
         raise AugmentSetupError(
@@ -745,19 +756,16 @@ def check_augment_setup(
             f"augment.musan_root={musan_root} に雑音ファイルが無く、雑音重畳が一度も"
             f"行われない（{error}）"
         ) from error
-
-    augment_config = config.augment.build()
-    assert augment_config is not None
-    validate_augment_config(augment_config)
     subsets = "、".join(str(Path(musan_root) / subset) for subset in noise.subsets)
-    return describe_augment_config(
-        augment_config, noise_description=f"{subsets}（{len(noise_paths)}ファイル）"
-    )
+    return f"{subsets}（{len(noise_paths)}ファイル）"
 
 
 def _build_noise_source(config: TrainConfig, logger: logging.Logger) -> Any:
     """MUSAN の noise サブセットを雑音源として用意する（設定にあれば）。"""
     if not config.augment.enabled or not config.augment.musan_root:
+        return None
+    augment_config = config.augment.build()
+    if augment_config is not None and not augment_config.noise_enabled:
         return None
     from spkrate.data.augment import MusanNoiseSource
 

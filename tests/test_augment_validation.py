@@ -7,6 +7,7 @@
 - 拡張が有効なのに、ある拡張が黙って実行されない設定は ``AugmentSetupError`` で止まる
   （musan_root の欠落、features 経路、確率0、無変化の範囲、依存の欠落など）
 - 止まるのはデータ読み込み・モデル構築より前で、理由が log.txt に残る
+- 拡張ごとの ``*_enabled: false`` はエラーにならず、その拡張の確率・範囲は検査しない
 - 正しい設定では止まらず、log.txt の学習ループより前に拡張の一覧が出る
 - 拡張が無効なら「拡張=なし」と出る。無効なのに params や musan_root が書かれていれば
   止めずに警告を出し、log.txt にも残す
@@ -259,3 +260,53 @@ def test_disabled_augment_warning_is_written_to_log_txt(tmp_path: Path) -> None:
     warning = next(line for line in lines if "WARNING" in line and "augment.params" in line)
     assert "augment.musan_root" in warning
     assert any("エポック1" in line for line in lines)  # 止まらずに学習した
+
+
+# --------------------------------------------------------------------------------------
+# 拡張ごとの有効フラグ（docs/questions.md 2026-09-24 回答2）
+
+_NAMES = ("time_stretch", "reverb", "noise", "band_limit", "volume", "freq_mask")
+_LABELS = ("時間伸縮", "残響", "雑音重畳", "帯域制限", "音量変化", "周波数マスク")
+
+
+def test_individual_flags_default_to_enabled() -> None:
+    config = AugmentConfig()
+    assert all(getattr(config, f"{name}_enabled") is True for name in _NAMES)
+
+
+@pytest.mark.parametrize(("name", "label"), list(zip(_NAMES, _LABELS)))
+def test_individually_disabled_augment_does_not_stop(
+    tmp_path: Path, musan: Path, name: str, label: str
+) -> None:
+    # 確率0や無効な範囲が書かれていても、個別に無効なら検査しない
+    params: dict[str, Any] = {f"{name}_enabled": False, f"{name}_prob": 0.0}
+    lines = check_augment_setup(_config(tmp_path, augment={"params": params}))
+    assert f"拡張: {label} 無効（{name}_enabled=false）" in lines
+    others = [other for other in _LABELS if other != label]
+    for other in others:
+        assert any(line.startswith(f"拡張: {other} 確率=") for line in lines)
+
+
+def test_all_individually_disabled_does_not_stop(tmp_path: Path, musan: Path) -> None:
+    params = {f"{name}_enabled": False for name in _NAMES}
+    lines = check_augment_setup(_config(tmp_path, augment={"params": params}))
+    assert sum("無効（" in line for line in lines) == len(_NAMES)
+
+
+def test_noise_disabled_does_not_require_musan(tmp_path: Path) -> None:
+    config = _config(tmp_path, augment={"musan_root": None, "params": {"noise_enabled": False}})
+    lines = check_augment_setup(config)
+    assert "拡張: 雑音重畳 無効（noise_enabled=false）" in lines
+
+
+def test_enabled_with_zero_probability_still_stops(tmp_path: Path, musan: Path) -> None:
+    config = _config(
+        tmp_path, augment={"params": {"reverb_enabled": True, "reverb_prob": 0.0}}
+    )
+    with pytest.raises(AugmentSetupError, match="reverb_enabled: false"):
+        check_augment_setup(config)
+
+
+def test_non_bool_flag_stops() -> None:
+    with pytest.raises(AugmentSetupError, match="true か false"):
+        validate_augment_config(AugmentConfig.from_mapping({"reverb_enabled": "false"}))
