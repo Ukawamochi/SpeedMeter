@@ -1,0 +1,52 @@
+# チェックポイントからの再開（resume_from）の完走確認用の設定。
+# 実装: src/spkrate/train/train.py（モジュール docstring「チェックポイントからの再開」）
+#
+# これは**本番の学習ではない**。exp001 の checkpoint_last.pt（エポック6、optimizer_state あり）
+# から、silence_samples を有効にして再開し、エポック番号が7から数えられること、
+# 構造・正規化の検査を通ること、最良値を測り直すことがログに残ることを確かめる。
+# 件数もエポック数も小さいので、ここで出る指標に意味は無い。
+# モデル構造・正規化・学習率は exp001 と同じにする（違えば開始前に止まる／ログに出る）。
+#
+# 実行:
+#   PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m spkrate.train.train --config configs/exp000_resume_smoke.yaml
+
+experiment_id: exp000_resume_smoke
+seed: 20260921
+device: mps          # CLAUDE.md「学習デバイスはmps」
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: exp001 の checkpoint_last.pt から silence_samples 有効で再開する完走確認。指標の比較には使わない
+resume_from: runs/exp001/checkpoint_last.pt
+
+data:
+  source: features
+  dev_source: features
+  features_dir: data/processed/features
+  train_split: configs/splits/train.json
+  dev_split: configs/splits/dev.json     # 検証は dev のみ。test.json は使わない
+  max_train_clips: 512
+  max_dev_clips: 256
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+augment:
+  enabled: false
+
+silence_samples:
+  enabled: true      # それ以外は既定値（割合0.03、3種等分、-90〜-60dBFS、長さは学習クリップの分布）
+  musan_root: data/musan
+
+train:
+  max_epochs: 9                   # 通算。exp001 のエポック6の続きで 7・8・9 を学習する
+  early_stopping_patience: 2
+  batch_size: 16
+  loss: mse
+  learning_rate: 0.0001           # exp001 と同じ
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 2
+  bucketing: true
+  bucket_pool_batches: 20
+  best_metric: mae_moras_per_sec
+  log_interval: 10
+  record_metrics_csv: false  # 完走確認なので results/metrics.csv には残さない
