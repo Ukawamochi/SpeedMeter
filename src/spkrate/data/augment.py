@@ -58,6 +58,7 @@ import numpy as np
 
 __all__ = [
     "SAMPLE_RATE",
+    "SPEC_RANGES",
     "STFT_HOP_LENGTH",
     "STFT_N_FFT",
     "AUGMENTATIONS",
@@ -781,6 +782,14 @@ _RANGES: dict[str, tuple[str, ...]] = {
     "freq_mask": (),
 }
 
+#: docs/spec.md「データ拡張」に範囲が書かれている項目と、その範囲（両端を含む）。
+#: 範囲を変える場合は先に docs/spec.md を更新する（docs/questions.md 2026-09-24 回答3）。
+#: spec.md に範囲が無い項目には制約を設けない。
+SPEC_RANGES: dict[str, tuple[float, float, str]] = {
+    "time_stretch_range": (0.7, 1.5, "時間伸縮0.7〜1.5倍"),
+    "snr_db_range": (0.0, 20.0, "雑音重畳SNR0〜20dB"),
+}
+
 # generate_rir の既定の margin（音源とマイクを壁から離す距離、メートル）。
 _RIR_MARGIN = 0.5
 
@@ -861,6 +870,21 @@ def validate_augment_config(config: AugmentConfig) -> None:
                 f"freq_mask_num={config.freq_mask_num}・freq_mask_max_width="
                 f"{config.freq_mask_max_width} では周波数マスクが常に無変化になる"
             )
+
+    # docs/spec.md に範囲が書かれている項目（上の検査を通った後に確かめる）
+    for name, _ in AUGMENTATIONS:
+        if not enabled[name]:
+            continue
+        for range_key in _RANGES[name]:
+            if range_key not in SPEC_RANGES:
+                continue
+            spec_low, spec_high, spec_text = SPEC_RANGES[range_key]
+            low, high = (float(value) for value in getattr(config, range_key))
+            if low < spec_low or high > spec_high:
+                raise AugmentSetupError(
+                    f"{range_key}={getattr(config, range_key)} は docs/spec.md の範囲"
+                    f"（{spec_text}）の外にある。範囲を変えるなら先に docs/spec.md を更新する"
+                )
 
 
 def _validate_time_stretch(config: AugmentConfig) -> None:

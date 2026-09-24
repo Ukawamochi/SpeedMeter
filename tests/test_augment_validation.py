@@ -310,3 +310,49 @@ def test_enabled_with_zero_probability_still_stops(tmp_path: Path, musan: Path) 
 def test_non_bool_flag_stops() -> None:
     with pytest.raises(AugmentSetupError, match="true か false"):
         validate_augment_config(AugmentConfig.from_mapping({"reverb_enabled": "false"}))
+
+
+# --------------------------------------------------------------------------------------
+# docs/spec.md の範囲（docs/questions.md 2026-09-24 回答3）
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"time_stretch_range": [0.6, 1.5]},
+        {"time_stretch_range": [0.7, 1.6]},
+        {"time_stretch_range": [0.5, 2.0]},
+        {"snr_db_range": [-5.0, 20.0]},
+        {"snr_db_range": [0.0, 30.0]},
+    ],
+)
+def test_out_of_spec_range_stops(tmp_path: Path, musan: Path, params: dict[str, Any]) -> None:
+    config = _config(tmp_path, augment={"params": params})
+    with pytest.raises(AugmentSetupError, match="docs/spec.md の範囲"):
+        check_augment_setup(config)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"time_stretch_range": [0.7, 1.5]},  # 両端を含む
+        {"time_stretch_range": [0.8, 1.2]},  # 内側への狭めは許す
+        {"snr_db_range": [0.0, 20.0]},
+        {"snr_db_range": [5.0, 15.0]},
+        # spec.md に範囲が無い項目には新たな制約を設けない
+        {"gain_db_range": [-30.0, 20.0]},
+        {"rt60_range": [0.2, 1.2]},
+        {"high_hz_range": [2000.0, 7900.0]},
+    ],
+)
+def test_within_spec_range_or_unspecified_passes(
+    tmp_path: Path, musan: Path, params: dict[str, Any]
+) -> None:
+    check_augment_setup(_config(tmp_path, augment={"params": params}))
+
+
+def test_out_of_spec_range_is_ignored_when_individually_disabled(
+    tmp_path: Path, musan: Path
+) -> None:
+    params = {"time_stretch_enabled": False, "time_stretch_range": [0.5, 2.0]}
+    check_augment_setup(_config(tmp_path, augment={"params": params}))
