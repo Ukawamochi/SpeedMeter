@@ -177,3 +177,8 @@
 ### 2026-09-24 診断指標D1・D2・D3の定義をspec.mdに明記
 - 人間の指示でdocs/spec.mdに「診断指標」節を新設し、D1・D2・D3の入力・計算・意味と閾値B1・B2・B5の根拠を005（4.3節・5節・7節）から転記した。定義とコードは変えていない。
 - 005に無く実装から読み取った項目（乱数の種、D1/D3の平均の取り方、D2の雑音の切り出しと2種の扱い、D3の母集団と組の作り方）はその旨を明記した。B2の1.0とB5の0.25の数値の根拠は既存docsに記載なしと明記した。
+
+### 2026-09-24 雑音下評価セット dev_noisy と clean・noisy 両方の評価
+- configs/eval/dev_noisy.yaml と src/spkrate/eval/noisy.py を追加した。dev全件×SNR 5/10/15dBに固定の残響（6.0×4.5×2.7m、RT60目標0.5秒、max_order 30で実測0.51秒）→MUSAN noiseを掛ける。雑音はシード20260924とclip_idで決まりSNRに依存しない。波形から都度生成（dev全件×3条件で約6分の見積り）。
+- runner.py と scripts/eval_dev_full.py で metrics.csv の split 列を dev / dev_noisy_snr5・10・15 / dev_noisy_all（3条件まとめ）に分けて追記する。noisy行のconfig_pathは「実験設定;dev_noisy設定」。
+- exp001 で dev 先頭200件の clean・noisy 評価が通ることをテスト用の csv で確認した（results/metrics.csv には追記していない）。dev全件の noisy 評価は未実施。
