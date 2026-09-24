@@ -77,7 +77,12 @@ import yaml
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 
-from spkrate.data.augment import AugmentConfig
+from spkrate.data.augment import (
+    AugmentConfig,
+    AugmentSetupError,
+    describe_augment_config,
+    validate_augment_config,
+)
 from spkrate.eval.metrics import SpeedRateMetrics, compute_metrics
 from spkrate.eval.runner import git_commit_info
 from spkrate.models.cnn import CnnConfig, SpeechRateCNN, model_summary
@@ -103,6 +108,7 @@ __all__ = [
     "TrainingOutcome",
     "build_loss",
     "build_datasets",
+    "check_augment_setup",
     "evaluate_dev",
     "load_checkpoint",
     "load_train_config",
@@ -680,6 +686,58 @@ def build_datasets(
     return train_dataset, dev_dataset, normalizer
 
 
+def check_augment_setup(config: TrainConfig) -> list[str]:
+    """拡張の設定を学習開始前に検査し、ログに書く一覧を返す。
+
+    データの読み込みやモデルの構築より前に呼ぶ（``run_training`` の冒頭）。
+    拡張が有効なのに、ある拡張が黙って実行されない設定を ``AugmentSetupError`` で止める。
+    検出する条件と、止めない条件の一覧は results/augment_validation.md。
+
+    Returns:
+        ``log.txt`` に書く行。無効なら ``["拡張=なし"]``。
+    """
+    if not config.augment.enabled:
+        return ["拡張=なし"]
+
+    source = config.train_source
+    if source != "waveform":
+        raise AugmentSetupError(
+            f"augment.enabled=true だが data.source={source} で、拡張が掛からない"
+            "（拡張は波形に適用する。docs/decisions/006-augmentation.md 1節）。"
+            "data.source を waveform にすること"
+        )
+
+    musan_root = config.augment.musan_root
+    if not musan_root:
+        raise AugmentSetupError(
+            "augment.enabled=true だが augment.musan_root が未設定で、雑音重畳が一度も"
+            "行われない。MUSAN の配置先（data/DATASETS.md、通常は data/musan）を書くこと"
+        )
+    if not Path(musan_root).is_dir():
+        raise AugmentSetupError(
+            f"augment.musan_root={musan_root} がディレクトリとして存在しない。"
+            "配置先は data/DATASETS.md を参照する"
+        )
+    from spkrate.data.augment import MusanNoiseSource
+
+    noise = MusanNoiseSource(musan_root)
+    try:
+        noise_paths = noise.paths
+    except FileNotFoundError as error:
+        raise AugmentSetupError(
+            f"augment.musan_root={musan_root} に雑音ファイルが無く、雑音重畳が一度も"
+            f"行われない（{error}）"
+        ) from error
+
+    augment_config = config.augment.build()
+    assert augment_config is not None
+    validate_augment_config(augment_config)
+    subsets = "、".join(str(Path(musan_root) / subset) for subset in noise.subsets)
+    return describe_augment_config(
+        augment_config, noise_description=f"{subsets}（{len(noise_paths)}ファイル）"
+    )
+
+
 def _build_noise_source(config: TrainConfig, logger: logging.Logger) -> Any:
     """MUSAN の noise サブセットを雑音源として用意する（設定にあれば）。"""
     if not config.augment.enabled or not config.augment.musan_root:
@@ -881,6 +939,22 @@ def run_training(
     run_dir = config.run_dir
     run_dir.mkdir(parents=True, exist_ok=True)
     log = logger or setup_logger(run_dir)
+
+    # 設定の記録と拡張の検査は、データの読み込み・モデルの構築より前に行う。
+    commit = git_commit_info()
+    log.info(
+        "コミット=%s%s 設定=%s",
+        commit.commit_hash,
+        "（未コミットの変更あり）" if commit.dirty else "",
+        config.config_path or "（なし）",
+    )
+    try:
+        augment_lines = check_augment_setup(config)
+    except AugmentSetupError as error:
+        log.error("拡張の設定の誤りで停止する: %s", error)
+        raise
+    for line in augment_lines:
+        log.info("%s", line)
 
     if config.train.loss not in LOSSES:
         raise ValueError(f"loss は {LOSSES} のいずれか: {config.train.loss}")

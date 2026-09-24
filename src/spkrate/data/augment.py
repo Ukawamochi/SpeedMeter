@@ -62,6 +62,7 @@ __all__ = [
     "STFT_N_FFT",
     "AugmentConfig",
     "AugmentResult",
+    "AugmentSetupError",
     "ArrayNoiseSource",
     "MusanNoiseSource",
     "NoiseSource",
@@ -70,6 +71,7 @@ __all__ = [
     "augment_waveform",
     "band_limit",
     "change_volume",
+    "describe_augment_config",
     "fit_noise",
     "frequency_mask",
     "generate_rir",
@@ -77,6 +79,7 @@ __all__ = [
     "mora_count_after_time_stretch",
     "mora_per_second_after_time_stretch",
     "time_stretch",
+    "validate_augment_config",
 ]
 
 # docs/spec.md「入力: 16kHzモノラル音声」。
@@ -727,3 +730,182 @@ def augment_feature(
             mask_value=config.freq_mask_value,
         )
     return np.asarray(feature, dtype=np.float32)
+
+
+# --------------------------------------------------------------------------------------
+# 学習開始前の設定検査（results/augment_validation.md）
+
+
+class AugmentSetupError(ValueError):
+    """拡張が有効なのに、ある拡張が実行されない（または途中で必ず失敗する）設定。
+
+    学習ループの途中やデータ読み込みの途中ではなく、設定を読んだ直後に投げる。
+    """
+
+
+#: (確率の項目名, 表示名)。適用順は ``augment_waveform`` と ``augment_feature`` に合わせる。
+_PROBABILITIES: tuple[tuple[str, str], ...] = (
+    ("time_stretch_prob", "時間伸縮"),
+    ("reverb_prob", "残響"),
+    ("noise_prob", "雑音重畳"),
+    ("band_limit_prob", "帯域制限"),
+    ("volume_prob", "音量変化"),
+    ("freq_mask_prob", "周波数マスク"),
+)
+
+_RANGES: tuple[str, ...] = (
+    "time_stretch_range",
+    "rt60_range",
+    "room_x_range",
+    "room_y_range",
+    "room_z_range",
+    "snr_db_range",
+    "low_hz_range",
+    "high_hz_range",
+    "gain_db_range",
+)
+
+# generate_rir の既定の margin（音源とマイクを壁から離す距離、メートル）。
+_RIR_MARGIN = 0.5
+
+
+def _require_module(name: str, purpose: str) -> None:
+    import importlib
+
+    try:
+        importlib.import_module(name)
+    except ImportError as error:
+        raise AugmentSetupError(
+            f"{purpose}に必要な {name} を読み込めない（{error}）。"
+            "pyproject.toml の依存を uv sync で入れること"
+        ) from error
+
+
+def validate_augment_config(config: AugmentConfig) -> None:
+    """拡張ごとに「有効なのに実行されない」「途中で必ず失敗する」設定を検出する。
+
+    サンプル単位で起きる正当なスキップ（無音に雑音を足さない、音量の上限クリップなど）は
+    ここでは扱わない。一覧は results/augment_validation.md。
+
+    Raises:
+        AugmentSetupError: 該当する設定があったとき。
+    """
+    if int(config.sample_rate) != SAMPLE_RATE:
+        raise AugmentSetupError(
+            f"sample_rate={config.sample_rate} は docs/spec.md の入力（16kHz）と異なる"
+        )
+
+    for key, label in _PROBABILITIES:
+        prob = float(getattr(config, key))
+        if not math.isfinite(prob) or prob < 0.0 or prob > 1.0:
+            raise AugmentSetupError(f"{label}の確率 {key}={prob} は0より大きく1以下にすること")
+        if prob == 0.0:
+            raise AugmentSetupError(
+                f"拡張が有効なのに{label}の確率 {key}=0 で、{label}が一度も実行されない"
+            )
+
+    for key in _RANGES:
+        low, high = (float(value) for value in getattr(config, key))
+        if not (math.isfinite(low) and math.isfinite(high)):
+            raise AugmentSetupError(f"{key}={getattr(config, key)} に有限でない値がある")
+        if low > high:
+            raise AugmentSetupError(f"{key}={getattr(config, key)} の下限が上限を超えている")
+
+    # 時間伸縮
+    low, high = config.time_stretch_range
+    if low <= 0.0:
+        raise AugmentSetupError(f"time_stretch_range={config.time_stretch_range} は正の値にすること")
+    if low == high == 1.0:
+        raise AugmentSetupError(
+            "time_stretch_range=(1.0, 1.0) で時間伸縮が常に無変化になる"
+        )
+    _require_module("librosa", "時間伸縮")
+
+    # 残響
+    _require_module("pyroomacoustics", "残響")
+    _require_module("scipy", "残響と帯域制限")
+    if config.rt60_range[0] <= 0.0:
+        raise AugmentSetupError(f"rt60_range={config.rt60_range} は正の値にすること")
+    for key in ("room_x_range", "room_y_range", "room_z_range"):
+        if float(getattr(config, key)[0]) < 2.0 * _RIR_MARGIN:
+            raise AugmentSetupError(
+                f"{key}={getattr(config, key)} の下限が {2.0 * _RIR_MARGIN}m 未満で、"
+                "音源とマイクを置けない"
+            )
+    if int(config.reverb_max_order) < 1:
+        raise AugmentSetupError(
+            f"reverb_max_order={config.reverb_max_order} では反射が計算されず残響が付かない"
+        )
+    import pyroomacoustics as pra
+
+    # 最も実現しやすい組（最小の部屋・最長の残響時間）でも吸音率が1を超えるなら、
+    # generate_rir は毎回無響の応答 [1.0] を返し、残響は一度も付かない。
+    smallest_room = [
+        float(config.room_x_range[0]),
+        float(config.room_y_range[0]),
+        float(config.room_z_range[0]),
+    ]
+    try:
+        pra.inverse_sabine(float(config.rt60_range[1]), smallest_room)
+    except ValueError as error:
+        raise AugmentSetupError(
+            f"rt60_range={config.rt60_range} は部屋の寸法の範囲では実現できず、"
+            f"残響が常に無響の応答に置き換わる（{error}）"
+        ) from error
+
+    # 帯域制限
+    nyquist = float(config.sample_rate) / 2.0
+    high_pass_possible = float(config.low_hz_range[1]) > 0.0
+    low_pass_possible = float(config.high_hz_range[0]) < nyquist
+    if not high_pass_possible and not low_pass_possible:
+        raise AugmentSetupError(
+            f"low_hz_range={config.low_hz_range}・high_hz_range={config.high_hz_range} では"
+            f"低域も高域も削られず、帯域制限が常に無変化になる（ナイキスト={nyquist:g}Hz）"
+        )
+    if (
+        high_pass_possible
+        and low_pass_possible
+        and float(config.low_hz_range[1]) >= float(config.high_hz_range[0])
+    ):
+        raise AugmentSetupError(
+            f"low_hz_range={config.low_hz_range} と high_hz_range={config.high_hz_range} が"
+            "重なり、通過帯域が空になる組が引かれうる（学習の途中で例外になる）"
+        )
+    if int(config.band_limit_order) < 1:
+        raise AugmentSetupError(f"band_limit_order={config.band_limit_order} は1以上にすること")
+
+    # 音量変化
+    if tuple(float(value) for value in config.gain_db_range) == (0.0, 0.0):
+        raise AugmentSetupError("gain_db_range=(0.0, 0.0) で音量変化が常に無変化になる")
+
+    # 周波数マスク
+    if int(config.freq_mask_num) <= 0 or int(config.freq_mask_max_width) <= 0:
+        raise AugmentSetupError(
+            f"freq_mask_num={config.freq_mask_num}・freq_mask_max_width="
+            f"{config.freq_mask_max_width} では周波数マスクが常に無変化になる"
+        )
+
+
+def describe_augment_config(
+    config: AugmentConfig, *, noise_description: str
+) -> list[str]:
+    """学習ログの先頭に書く、有効な拡張の一覧（1拡張1行）。"""
+
+    def span(key: str, fmt: str = "{:g}") -> str:
+        low, high = getattr(config, key)
+        return f"{fmt.format(low)}〜{fmt.format(high)}"
+
+    return [
+        "拡張=あり 適用順=時間伸縮→残響→雑音重畳→帯域制限→音量変化（波形）→周波数マスク（特徴量）",
+        f"拡張: 時間伸縮 確率={config.time_stretch_prob:g} 伸縮率={span('time_stretch_range')}倍",
+        f"拡張: 残響 確率={config.reverb_prob:g} RT60={span('rt60_range')}秒 "
+        f"部屋={span('room_x_range')}×{span('room_y_range')}×{span('room_z_range')}m "
+        f"最大反射次数={config.reverb_max_order}",
+        f"拡張: 雑音重畳 確率={config.noise_prob:g} SNR={span('snr_db_range')}dB "
+        f"雑音源={noise_description}",
+        f"拡張: 帯域制限 確率={config.band_limit_prob:g} 低域遮断={span('low_hz_range')}Hz "
+        f"高域遮断={span('high_hz_range')}Hz 次数={config.band_limit_order}",
+        f"拡張: 音量変化 確率={config.volume_prob:g} 利得={span('gain_db_range')}dB",
+        f"拡張: 周波数マスク 確率={config.freq_mask_prob:g} 本数={config.freq_mask_num} "
+        f"最大幅={config.freq_mask_max_width}メル 埋める値={config.freq_mask_value:g}",
+    ]
