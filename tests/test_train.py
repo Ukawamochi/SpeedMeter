@@ -538,3 +538,239 @@ def test_training_config_cannot_point_dev_split_at_test_json(tmp_path: Path) -> 
         select_clip_records(
             tmp_path / "clips.jsonl", Path("configs/splits/test.json"), limit=1
         )
+
+
+# --------------------------------------------------------------------------------------
+# 早期終了・再開・所要時間の計測
+
+
+def _run_with(tmp_path: Path, name: str, *, train: dict, **overrides: object):
+    """合成データで学習する。``train`` は train 節をまるごと与える。"""
+    base_train = {"batch_size": 4, "loss": "mse", "num_workers": 0, "log_interval": 0}
+    config = load_train_config(
+        _write_train_config(
+            tmp_path / name, experiment_id=name, train={**base_train, **train}, **overrides
+        )
+    )
+    config = config.with_changes(
+        runs_dir=str(tmp_path / "runs"), model_overrides=_small_model_config().as_dict()
+    )
+    return config, run_training(
+        config,
+        train_dataset=SyntheticClipDataset(12, seed=0),
+        dev_dataset=SyntheticClipDataset(8, seed=1),
+    )
+
+
+def _log_text(outcome) -> str:
+    return (outcome.run_dir / "log.txt").read_text(encoding="utf-8")
+
+
+def test_early_stopping_stops_after_patience(tmp_path: Path) -> None:
+    # 学習率0なら重みが変わらず dev の値は毎エポック同じ。エポック1が基準になり、
+    # エポック2・3で改善なしが2回続くので patience=2 ならエポック3で止まる。
+    _, outcome = _run_with(
+        tmp_path,
+        "es",
+        train={"max_epochs": 10, "learning_rate": 0.0, "early_stopping_patience": 2},
+    )
+    assert outcome.stop_reason == "early_stopping"
+    assert outcome.last_epoch == 3
+    assert [row["epoch"] for row in outcome.history] == [1, 2, 3]
+    assert [row["epochs_without_improvement"] for row in outcome.history] == [0, 1, 2]
+    assert outcome.best_epoch == 1
+    summary = json.loads((outcome.run_dir / "run_summary.json").read_text(encoding="utf-8"))
+    assert summary["stop_reason"] == "early_stopping"
+    assert summary["last_epoch"] == 3
+    assert summary["best_epoch"] == 1
+    assert "終了理由=早期終了" in _log_text(outcome)
+
+
+def test_min_delta_counts_small_gains_as_no_improvement(tmp_path: Path) -> None:
+    # 最小改善幅を非常に大きくすれば、学習で値が下がってもエポック2以降は改善とみなさない。
+    _, outcome = _run_with(
+        tmp_path,
+        "delta",
+        train={
+            "max_epochs": 5,
+            "learning_rate": 0.001,
+            "early_stopping_patience": 1,
+            "early_stopping_min_delta": 1e6,
+        },
+    )
+    assert outcome.stop_reason == "early_stopping"
+    assert outcome.last_epoch == 2
+
+
+def test_training_stops_at_max_epochs(tmp_path: Path) -> None:
+    _, outcome = _run_with(
+        tmp_path,
+        "maxep",
+        train={"max_epochs": 3, "learning_rate": 0.0, "early_stopping_patience": 5},
+    )
+    assert outcome.stop_reason == "max_epochs"
+    assert outcome.last_epoch == 3
+    assert len(outcome.history) == 3
+    assert "終了理由=上限到達" in _log_text(outcome)
+
+
+def test_epochs_and_max_epochs_cannot_both_be_set(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="同時に書けない"):
+        load_train_config(
+            _write_train_config(tmp_path, train={"epochs": 3, "max_epochs": 5})
+        )
+
+
+def test_new_settings_default_to_disabled() -> None:
+    config = TrainConfig.from_mapping({"experiment_id": "x", "train": {"epochs": 6}})
+    assert config.train.early_stopping_patience is None
+    assert config.train.early_stopping_min_delta == 0.0
+    assert config.train.resolved_max_epochs == 6
+    assert config.resume_from is None
+
+
+def _adam_steps(path: Path) -> list[float]:
+    _, payload = load_checkpoint(path)
+    return [float(state["step"]) for state in payload["optimizer_state"]["state"].values()]
+
+
+def test_resume_continues_epoch_numbers_and_optimizer_state(tmp_path: Path) -> None:
+    _, first = _run_with(tmp_path, "src", train={"max_epochs": 2, "learning_rate": 0.001})
+    source = first.run_dir / "checkpoint_last.pt"
+    # 12件・バッチ4で1エポック3ステップ。2エポックで Adam の step は6。
+    assert set(_adam_steps(source)) == {6.0}
+
+    _, resumed = _run_with(
+        tmp_path,
+        "dst",
+        train={"max_epochs": 4, "learning_rate": 0.001},
+        resume_from=str(source),
+    )
+    assert resumed.start_epoch == 3
+    assert [row["epoch"] for row in resumed.history] == [3, 4]
+    assert resumed.last_epoch == 4
+    assert resumed.stop_reason == "max_epochs"
+    # 最適化器の状態を引き継いだので、step は 6 + 2エポック×3 = 12。
+    assert set(_adam_steps(resumed.run_dir / "checkpoint_last.pt")) == {12.0}
+    # 最良値は測り直す（再開後の最初のエポックが基準）。
+    assert resumed.history[0]["is_best"] is True
+    assert resumed.history[0]["epochs_without_improvement"] == 0
+    log = _log_text(resumed)
+    assert f"再開元={source}" in log
+    assert "再開元のエポック=2" in log
+    assert "最良値は引き継がず測り直す" in log
+    assert "乱数は seed=" in log
+    summary = json.loads((resumed.run_dir / "run_summary.json").read_text(encoding="utf-8"))
+    assert summary["resume"]["resumed"] is True
+    assert summary["resume"]["source_epoch"] == 2
+    assert summary["resume"]["best_value_policy"] == "remeasure"
+
+
+def test_resume_loads_model_weights(tmp_path: Path) -> None:
+    _, first = _run_with(tmp_path, "src", train={"max_epochs": 1, "learning_rate": 0.001})
+    source = first.run_dir / "checkpoint_last.pt"
+    # 学習率0で再開すれば重みは変わらないので、再開元と同じ重みが保存される。
+    _, resumed = _run_with(
+        tmp_path, "dst", train={"max_epochs": 2, "learning_rate": 0.0}, resume_from=str(source)
+    )
+    before, _ = load_checkpoint(source)
+    after, _ = load_checkpoint(resumed.run_dir / "checkpoint_last.pt")
+    for key, value in before.state_dict().items():
+        assert torch.equal(value, after.state_dict()[key]), key
+
+
+def test_resume_without_optimizer_state_starts_from_scratch(tmp_path: Path) -> None:
+    _, first = _run_with(tmp_path, "src", train={"max_epochs": 1, "learning_rate": 0.001})
+    # checkpoint_best.pt は optimizer_state を含まない。
+    source = first.run_dir / "checkpoint_best.pt"
+    _, payload = load_checkpoint(source)
+    assert "optimizer_state" not in payload
+
+    _, outcome = _run_with(
+        tmp_path, "dst", train={"max_epochs": 2, "learning_rate": 0.001}, resume_from=str(source)
+    )
+    assert outcome.start_epoch == 1
+    assert [row["epoch"] for row in outcome.history] == [1, 2]
+    assert outcome.resume["resumed"] is False
+    log = _log_text(outcome)
+    assert "optimizer_state が無いため再開せず、最初から学習する" in log
+
+
+def test_resume_rejects_model_structure_mismatch(tmp_path: Path) -> None:
+    from spkrate.train.train import ResumeError
+
+    _, first = _run_with(tmp_path, "src", train={"max_epochs": 1})
+    other = {**_small_model_config().as_dict(), "temporal_channels": [16, 16]}
+    config = load_train_config(
+        _write_train_config(
+            tmp_path / "dst",
+            experiment_id="dst",
+            resume_from=str(first.run_dir / "checkpoint_last.pt"),
+        )
+    ).with_changes(runs_dir=str(tmp_path / "runs"), model_overrides=other)
+    with pytest.raises(ResumeError, match="モデル構造が違う"):
+        run_training(
+            config,
+            train_dataset=SyntheticClipDataset(12, seed=0),
+            dev_dataset=SyntheticClipDataset(8, seed=1),
+        )
+
+
+def test_resume_rejects_normalization_mismatch(tmp_path: Path) -> None:
+    from spkrate.train.train import ResumeError
+
+    _, first = _run_with(tmp_path, "src", train={"max_epochs": 1})
+    norm = _write_normalization(tmp_path / "other_norm.yaml")
+    with pytest.raises(ResumeError, match="正規化"):
+        _run_with(
+            tmp_path,
+            "dst",
+            train={"max_epochs": 2},
+            resume_from=str(first.run_dir / "checkpoint_last.pt"),
+            data={"normalization": str(norm)},
+        )
+
+
+def test_resume_rejects_missing_file_and_finished_source(tmp_path: Path) -> None:
+    from spkrate.train.train import ResumeError
+
+    with pytest.raises(ResumeError, match="無い"):
+        _run_with(tmp_path, "a", train={"max_epochs": 2}, resume_from=str(tmp_path / "no.pt"))
+    _, first = _run_with(tmp_path, "src", train={"max_epochs": 2})
+    with pytest.raises(ResumeError, match="上限"):
+        _run_with(
+            tmp_path,
+            "b",
+            train={"max_epochs": 2},
+            resume_from=str(first.run_dir / "checkpoint_last.pt"),
+        )
+    # 再開元が今回の出力先の中にあるときも止める。
+    with pytest.raises(ResumeError, match="出力先"):
+        _run_with(
+            tmp_path,
+            "src",
+            train={"max_epochs": 4},
+            resume_from=str(first.run_dir / "checkpoint_last.pt"),
+        )
+
+
+def test_timing_columns_are_written(tmp_path: Path) -> None:
+    _, outcome = _run_with(tmp_path, "timing", train={"max_epochs": 1})
+    row = json.loads(
+        (outcome.run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    for key in (
+        "epoch_seconds",
+        "train_seconds",
+        "train_step_seconds",
+        "data_wait_seconds",
+        "data_wait_ratio",
+        "dev_eval_seconds",
+    ):
+        assert key in row and row[key] >= 0.0, key
+    assert 0.0 <= row["data_wait_ratio"] <= 1.0
+    assert row["train_step_seconds"] + row["data_wait_seconds"] <= row["train_seconds"] + 1e-6
+    assert row["epoch_seconds"] >= row["train_seconds"] + row["dev_eval_seconds"] - 1e-6
+    log = _log_text(outcome)
+    assert "所要時間: 全体=" in log and "データ待ち=" in log and "dev評価=" in log
+    assert "データ読み込み律速" in log
