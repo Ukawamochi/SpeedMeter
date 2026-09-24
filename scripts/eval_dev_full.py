@@ -5,9 +5,15 @@
 
 - 評価データ: data/processed/features/dev（configs/splits/dev.json の話者）。test.json は使わない
 - 指標: ``spkrate.train.train.evaluate_dev``（学習中の dev 評価と同じ）。バッチ64、長さ順バケッティング
-- 1推論あたりの処理時間: docs/spec.md の推論単位である 2.0秒窓（32000標本）1回あたり。
+- 1推論あたりの処理時間（旧方式）: docs/spec.md の推論単位である 2.0秒窓（32000標本）1回あたり。
   対数メル計算 → 正規化 → mps でのモデル前向き計算 までを1回として測る
-  （音声の読み込み・再標本化は含めない。第3段階のベースラインの測り方に合わせる）
+  （音声の読み込み・再標本化は含めない。第3段階のベースラインの測り方に合わせる）。
+  ウォームアップ20回の後200回の**平均**を ``latency_ms_per_inference`` 列に書く。
+  この値はモデルごとに別のプロセス・時刻で測るため、**モデル間の比較には使わない**
+  （参考値として残す。``latency_session_id`` 等の新方式の列は空欄）。
+  比較に使う推論時間は、精度評価とは別に ``scripts/measure_latency.py`` で比較対象の全モデルを
+  同一プロセス内で測った新方式の値（``latency_session_id`` 付きの中央値・最大値）である
+  （docs/decisions/007-latency-measurement.md）
 - モデルサイズ: ``spkrate.eval.runner.model_size_bytes``（checkpoint_best.pt のファイルサイズ）
 - 雑音下評価 dev_noisy（``configs/eval/dev_noisy.yaml``、``spkrate.eval.noisy``）: clean と同じ
   クリップに固定の残響と MUSAN noise（SNR 5/10/15 dB）を掛け、波形から都度対数メルを計算して
@@ -78,6 +84,7 @@ NORMALIZATION = "configs/normalization.yaml"
 
 
 def measure_latency(model, normalizer, device, *, warmup=20, repeats=200):
+    """旧方式の推論時間（平均）。比較には使わない（モジュール docstring、spkrate.eval.latency）。"""
     rng = np.random.default_rng(LATENCY_SEED)
     samples = (rng.standard_normal(int(WINDOW_SEC * SAMPLE_RATE)) * 0.05).astype(np.float32)
     feature = normalizer(log_mel_spectrogram(samples, SAMPLE_RATE))
