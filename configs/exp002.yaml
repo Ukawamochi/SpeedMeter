@@ -1,0 +1,64 @@
+# データ拡張ありの学習（exp001 との比較対象）。
+# 実装: src/spkrate/train/train.py / src/spkrate/train/data.py / src/spkrate/data/augment.py
+#
+# 実行（リポジトリ直下から）:
+#   PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m spkrate.train.train --config configs/exp002.yaml
+#
+# ## exp001（configs/exp001.yaml）との差分と理由
+#
+# 差分は「拡張を有効にする」ことだけにする。拡張の有無の効果を exp001 と比べるため、
+# モデル構造・エポック数(6)・損失(mse)・学習率(1e-4)・重み減衰・勾配の上限・バッチ(64)・
+# num_workers(4)・バケッティング・シード・検証の設定・best_metric はすべて exp001 と同じ。
+#
+# - augment.enabled: false → true
+#     params は書かず、src/spkrate/data/augment.py の AugmentConfig 既定値をそのまま使う
+#     （時間伸縮 p0.5・0.7〜1.5倍、残響 p0.3、雑音重畳 p0.5・SNR 0〜20dB、帯域制限 p0.25、
+#      音量変化 p0.5・−12〜+6dB、周波数マスク p0.5・2本・最大12メル）。
+# - augment.musan_root: data/musan を追加
+#     未設定だと雑音重畳が一度も行われない（results/augment_validation.md 条件1）。
+#     雑音源は data/musan/noise の wav（930ファイル）。
+# - data.source: features → waveform
+#     拡張は波形に掛けるため、学習データは波形から都度メルを計算する経路が必要
+#     （docs/decisions/006-augmentation.md 1節。features のままだと学習開始前の検査で停止する）。
+#     clips_jsonl と audio_root は既定値（data/processed/clips.jsonl、リポジトリ直下）。
+# - 検証（dev）は exp001 と同じく features 経路・拡張なし・全件で毎エポック評価する。
+# - notes と experiment_id のみ文言が異なる。
+#
+# test.json は使わない。検証は configs/splits/dev.json のみ。
+
+experiment_id: exp002
+seed: 20260921
+device: mps          # CLAUDE.md「学習デバイスはmps」
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: 拡張あり（AugmentConfig 既定値、MUSAN noise）。拡張以外は exp001 と同一
+
+data:
+  source: waveform       # 拡張は波形に掛けるので波形から都度メルを計算する
+  dev_source: features   # 検証は exp001 と同じく事前計算特徴量・拡張なし
+  features_dir: data/processed/features
+  train_split: configs/splits/train.json
+  dev_split: configs/splits/dev.json     # 検証は dev のみ
+  max_train_clips: null  # 学習データは全件
+  max_dev_clips: null    # 全29,518件で毎エポック評価する
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+augment:
+  enabled: true
+  musan_root: data/musan   # 雑音源は data/musan/noise
+
+train:
+  epochs: 6
+  batch_size: 64
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 4
+  bucketing: true
+  bucket_pool_batches: 20
+  best_metric: mae_moras_per_sec
+  log_interval: 200
+  # exp001 と同じく、results/metrics.csv への追記は学習後の評価で行う。
+  record_metrics_csv: false
