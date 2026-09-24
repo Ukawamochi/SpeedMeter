@@ -276,6 +276,11 @@ class FeatureClipDataset(Dataset):
         """各件のフレーム数（長さでまとめるバッチ分けに使う）。"""
         return [int(entry["n_frames"]) for entry in self.entries]
 
+    @property
+    def durations_sec(self) -> list[float]:
+        """各件のクリップ長（秒）。無音サンプルの長さの分布に使う（``spkrate.train.silence``）。"""
+        return [float(entry["duration_sec"]) for entry in self.entries]
+
     def _array(self, name: str) -> np.ndarray:
         array = self._arrays.get(name)
         if array is None:
@@ -391,6 +396,11 @@ class WaveformClipDataset(Dataset):
         return [
             max(1, int(record.duration_sec * FRAMES_PER_SECOND)) for record in self.records
         ]
+
+    @property
+    def durations_sec(self) -> list[float]:
+        """各件のクリップ長（秒、clips.jsonl の値）。無音サンプルの長さの分布に使う。"""
+        return [float(record.duration_sec) for record in self.records]
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)

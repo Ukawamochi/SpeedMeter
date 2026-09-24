@@ -99,6 +99,15 @@ from spkrate.train.data import (
     load_normalization,
     select_clip_records,
 )
+from spkrate.train.silence import (
+    SilenceSettings,
+    SilenceSetupError,
+    TrainWithSilence,
+    build_silence_dataset,
+    check_silence_setup,
+    describe_silence_counts,
+    is_silence_clip,
+)
 
 __all__ = [
     "AugmentSettings",
@@ -266,6 +275,9 @@ class TrainConfig:
     data: DataSettings = field(default_factory=DataSettings)
     train: TrainSettings = field(default_factory=TrainSettings)
     augment: AugmentSettings = field(default_factory=AugmentSettings)
+    # 正解モーラ数0の無音・雑音サンプルの追加（spkrate.train.silence、docs/spec.md「学習データ」）。
+    # 拡張とは独立に有効化できる。
+    silence_samples: SilenceSettings = field(default_factory=SilenceSettings)
     notes: str = ""
     config_path: str = ""
 
@@ -275,10 +287,13 @@ class TrainConfig:
         data = DataSettings.from_mapping(payload.pop("data", None))
         train = TrainSettings.from_mapping(payload.pop("train", None))
         augment = AugmentSettings.from_mapping(payload.pop("augment", None))
+        silence = SilenceSettings.from_mapping(payload.pop("silence_samples", None))
         payload = _reject_unknown(cls, payload)
         if "experiment_id" not in payload:
             raise ValueError("experiment_id が設定に無い")
-        return cls(**payload, data=data, train=train, augment=augment)
+        return cls(
+            **payload, data=data, train=train, augment=augment, silence_samples=silence
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -619,6 +634,9 @@ def build_datasets(
 ) -> tuple[Dataset, Dataset, Normalizer]:
     """設定から学習用・検証用のデータセットを作る（006の1節の2経路）。
 
+    ``silence_samples.enabled`` なら、学習データ（どちらの経路でも）の後ろに正解モーラ数0の
+    無音・雑音サンプルを連結する（``TrainWithSilence``）。検証には加えない。
+
     検証は常に拡張なしである。拡張ありで ``features`` 経路を選ぶ組み合わせは、
     拡張が波形に掛かる以上ありえないので ``ValueError`` で弾く。
     """
@@ -670,6 +688,19 @@ def build_datasets(
             noise_source=_build_noise_source(config, log),
             seed=config.seed,
         )
+
+    if config.silence_samples.enabled:
+        num_speech = len(train_dataset)  # type: ignore[arg-type]
+        silence_dataset = build_silence_dataset(
+            config.silence_samples,
+            train_dataset,
+            normalizer=normalizer,
+            seed=config.seed,
+            # 事前計算特徴量は float16 保存なので、同じ丸めを通す（silence.py の docstring）。
+            match_feature_storage=(source == "features"),
+        )
+        train_dataset = TrainWithSilence(train_dataset, silence_dataset)
+        log.info("%s", describe_silence_counts(num_speech, silence_dataset.counts))
 
     from spkrate.data.splits import load_split as _load_split
 
@@ -863,8 +894,10 @@ def _train_one_epoch(
     total_clips = 0
     total_abs_error = 0.0
     augment_counts: dict[str, int] = {}
+    silence_clips = 0
     started = time.perf_counter()
     for step, batch in enumerate(loader, start=1):
+        silence_clips += sum(1 for clip_id in batch.clip_ids if is_silence_clip(clip_id))
         for names in getattr(batch, "augment_applied", ()):
             for name in names:
                 augment_counts[name] = augment_counts.get(name, 0) + 1
@@ -896,6 +929,9 @@ def _train_one_epoch(
         "train_mae_moras_per_sec": total_abs_error / total_clips,
         "train_seconds": time.perf_counter() - started,
         "train_clips": total_clips,
+        # うち無音サンプル（spkrate.train.silence）の件数。拡張は掛けないので、
+        # 拡張の実適用率の分母からは除く。
+        "train_silence_clips": silence_clips,
         # 学習中に実際に掛かった拡張の回数。metrics.jsonl には書かず、ログにだけ出す。
         "augment_counts": augment_counts,
     }
@@ -1009,6 +1045,13 @@ def run_training(
         raise
     for line in augment_lines:
         log.info("%s", line)
+    try:
+        silence_lines = check_silence_setup(config.silence_samples)
+    except SilenceSetupError as error:
+        log.error("無音サンプルの設定の誤りで停止する: %s", error)
+        raise
+    for line in silence_lines:
+        log.info("%s", line)
 
     if config.train.loss not in LOSSES:
         raise ValueError(f"loss は {LOSSES} のいずれか: {config.train.loss}")
@@ -1064,6 +1107,8 @@ def run_training(
             "dataset": {
                 "num_train_clips": len(train_dataset),  # type: ignore[arg-type]
                 "num_dev_clips": len(dev_dataset),  # type: ignore[arg-type]
+                # 無音サンプルの件数（num_train_clips に含まれる）。無効なら null。
+                "silence_counts": getattr(train_dataset, "silence_counts", None),
             }
         },
     )
@@ -1104,7 +1149,10 @@ def run_training(
                 log.info(
                     "%s",
                     describe_epoch_augment_counts(
-                        epoch, augment_counts, int(train_stats["train_clips"])
+                        epoch,
+                        augment_counts,
+                        int(train_stats["train_clips"])
+                        - int(train_stats["train_silence_clips"]),
                     ),
                 )
             metrics, extras, predictions = evaluate_dev(model, dev_loader, loss_fn, device)
