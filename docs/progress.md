@@ -163,3 +163,8 @@
 ### 2026-09-24 拡張設定の欠落を学習開始前に検出（完了）
 - run_training の冒頭で check_augment_setup を呼ぶ。musan_root が欠けている場合、features 経路、確率0、無変化の範囲、依存の欠落など21条件で AugmentSetupError を投げて停止する。log.txt の先頭にコミットと拡張の一覧（無効なら「拡張=なし」）を書く。
 - 一覧は results/augment_validation.md。判断を保留した4件は docs/questions.md。pytest は433件すべて通過。
+
+### 2026-09-24 exp002（拡張あり）のdev評価と診断（完了）
+- scripts/eval_dev_full.py（exp001 と同じ手順を引数化）で dev 全件を評価し、metrics.csv に 007-augmentation 行を追記した。exp001 を同じスクリプトで評価し直すと指標・予測は完全一致した。
+- 低出力件数・D1〜D3（window_diagnostics.py に出力先の引数を追加し、exp001 の値の再現を確認）・エポック所要時間を results/exp002_eval.md に並記した。解釈は書いていない。
+- 処理時間は測定日で値が異なる（exp001: 09-21 は 1.75ms、09-24 は 4.18ms）。CPU フォールバックは 0 件。pytest は433件すべて通過。
