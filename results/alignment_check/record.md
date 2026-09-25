@@ -9,41 +9,42 @@
 備考には、ずれの箇所（時刻・かな）や原因の推測を書く。話速帯・文は `index.tsv` を参照。
 タスク5-1は「大きくずれる・失敗」が30件中3件を超えたら進まずに停止する。
 
-- 確認者:
-- 確認日:
+- 確認者: リポジトリ所有者（人間）
+- 確認日: 2026-09-26
+- 総括（確認者の申告）: 30件を、各モーラの推定位置にクリック音を重ねた音声（listening/2_アライメント_30件/）で聴いた。クリックのタイミングは全体に概ね合っていた。モーラごとの1対1の対応は確認していない。個別の行はこの総括にもとづく一括判定であり、「大きくずれる・失敗」と判断したものは無い
 
 | # | clip_id | 判定 | 備考 |
 | ---: | --- | --- | --- |
-| 1 | common_voice_ja_38997609 |  |  |
-| 2 | common_voice_ja_36368262 |  |  |
-| 3 | common_voice_ja_25110660 |  |  |
-| 4 | common_voice_ja_45174890 |  |  |
-| 5 | common_voice_ja_39091976 |  |  |
-| 6 | common_voice_ja_44757645 |  |  |
-| 7 | common_voice_ja_39071681 |  |  |
-| 8 | common_voice_ja_45132171 |  |  |
-| 9 | common_voice_ja_27930411 |  |  |
-| 10 | common_voice_ja_38904100 |  |  |
-| 11 | common_voice_ja_39782272 |  |  |
-| 12 | common_voice_ja_42132525 |  |  |
-| 13 | common_voice_ja_39052046 |  |  |
-| 14 | common_voice_ja_39040788 |  |  |
-| 15 | common_voice_ja_38963870 |  |  |
-| 16 | common_voice_ja_44595238 |  |  |
-| 17 | common_voice_ja_45072269 |  |  |
-| 18 | common_voice_ja_38998266 |  |  |
-| 19 | common_voice_ja_44757638 |  |  |
-| 20 | common_voice_ja_36340785 |  |  |
-| 21 | common_voice_ja_44897474 |  |  |
-| 22 | common_voice_ja_38966661 |  |  |
-| 23 | common_voice_ja_44870903 |  |  |
-| 24 | common_voice_ja_38975472 |  |  |
-| 25 | common_voice_ja_38988520 |  |  |
-| 26 | common_voice_ja_42098974 |  |  |
-| 27 | common_voice_ja_38880650 |  |  |
-| 28 | common_voice_ja_38985896 |  |  |
-| 29 | common_voice_ja_38987547 |  |  |
-| 30 | common_voice_ja_39125926 |  |  |
+| 1 | common_voice_ja_38997609 | 良好 | 一括判定（総括を参照） |
+| 2 | common_voice_ja_36368262 | 良好 | 一括判定（総括を参照） |
+| 3 | common_voice_ja_25110660 | 良好 | 一括判定（総括を参照） |
+| 4 | common_voice_ja_45174890 | 良好 | 一括判定（総括を参照） |
+| 5 | common_voice_ja_39091976 | 良好 | 一括判定（総括を参照） |
+| 6 | common_voice_ja_44757645 | 良好 | 一括判定（総括を参照） |
+| 7 | common_voice_ja_39071681 | 良好 | 一括判定（総括を参照） |
+| 8 | common_voice_ja_45132171 | 良好 | 一括判定（総括を参照） |
+| 9 | common_voice_ja_27930411 | 良好 | 一括判定（総括を参照） |
+| 10 | common_voice_ja_38904100 | 良好 | 一括判定（総括を参照） |
+| 11 | common_voice_ja_39782272 | 良好 | 一括判定（総括を参照） |
+| 12 | common_voice_ja_42132525 | 良好 | 一括判定（総括を参照） |
+| 13 | common_voice_ja_39052046 | 良好 | 一括判定（総括を参照） |
+| 14 | common_voice_ja_39040788 | 良好 | 一括判定（総括を参照） |
+| 15 | common_voice_ja_38963870 | 良好 | 一括判定（総括を参照） |
+| 16 | common_voice_ja_44595238 | 良好 | 一括判定（総括を参照） |
+| 17 | common_voice_ja_45072269 | 良好 | 一括判定（総括を参照） |
+| 18 | common_voice_ja_38998266 | 良好 | 一括判定（総括を参照） |
+| 19 | common_voice_ja_44757638 | 良好 | 一括判定（総括を参照） |
+| 20 | common_voice_ja_36340785 | 良好 | 一括判定（総括を参照） |
+| 21 | common_voice_ja_44897474 | 良好 | 一括判定（総括を参照） |
+| 22 | common_voice_ja_38966661 | 良好 | 一括判定（総括を参照） |
+| 23 | common_voice_ja_44870903 | 良好 | 一括判定（総括を参照） |
+| 24 | common_voice_ja_38975472 | 良好 | 一括判定（総括を参照） |
+| 25 | common_voice_ja_38988520 | 良好 | 一括判定（総括を参照） |
+| 26 | common_voice_ja_42098974 | 良好 | 一括判定（総括を参照） |
+| 27 | common_voice_ja_38880650 | 良好 | 一括判定（総括を参照） |
+| 28 | common_voice_ja_38985896 | 良好 | 一括判定（総括を参照） |
+| 29 | common_voice_ja_38987547 | 良好 | 一括判定（総括を参照） |
+| 30 | common_voice_ja_39125926 | 良好 | 一括判定（総括を参照） |
 
 ## 集計（記入後）
 
