@@ -91,3 +91,17 @@ pyopenjtalkの実測に関する注記
 1. 008 の結論（以後の基準構成を exp004 とする）の承認。docs/experiments/008-convergence-comparison.md
 2. MUSAN noise の930ファイルを、学習（拡張・無音サンプル）と評価（dev_noisy・D2）で分けずに使っている。雑音ファイルを学習用と評価用に分割するか
 3. docs/spec.md の評価指標に dev_noisy（雑音下評価）と推論時間の新しい測定規則（docs/decisions/007-latency-measurement.md）を加えるか
+
+### 2026-09-25 回答（収束比較（008）で生じた確認事項）
+
+人間から次の回答を得た（docs/directives/2026-09-25.md 0節の転記）。
+
+1. docs/experiments/008-convergence-comparison.md の結論を承認する。以後の基準構成は exp004（configs/exp004.yaml）とする。008 に書かれた留保（未収束の可能性、雑音ファイルの重なり、無音への出力、D1）はそのまま引き継ぐ
+2. MUSAN noise をファイル単位で学習用と評価用に分割する。内容は指示書のタスク2のとおり
+3. docs/spec.md の評価指標に、dev_noisy（雑音下評価）と推論時間の測定規則（docs/decisions/007-latency-measurement.md）を追加することを承認する。これは人間による仕様変更の指示である
+
+あわせて次が決定された。
+
+- 方式B（窓単位のラベル）への移行判定の保留を解除する。ただし判定は指示書のタスク5で窓単位の評価結果を得てから行う
+- 第6段階6-3（誤り事例の聴取）は人間が別途行う。第6.5段階は6-3の完了を待たずに進めてよい
+- configs/splits/test.json は引き続き使用しない
