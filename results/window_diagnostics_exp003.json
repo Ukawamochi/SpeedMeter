@@ -1,0 +1,97 @@
+{
+  "checkpoint": "runs/exp003/checkpoint_best.pt",
+  "experiment_id": "008-exp003-silence-noaug",
+  "best_epoch": 25,
+  "device": "mps",
+  "seed": 20260921,
+  "window_sec": 2.0,
+  "gap_sec": 0.2,
+  "receptive_field_frames": 69,
+  "D1": {
+    "population": 13322,
+    "sampled": 1000,
+    "min_duration_sec": 4.0,
+    "abs_error_mora_per_sec": {
+      "count": 1000,
+      "mean": 0.3675231635570526,
+      "median": 0.337416410446167,
+      "p90": 0.6855783462524414,
+      "max": 1.6032419204711914,
+      "std": 0.2522101402282715
+    },
+    "signed_error_mora_per_sec_mean": -0.3601415455341339,
+    "mean_num_windows": 2.8499999046325684,
+    "mean_covered_sec": 5.699999809265137,
+    "mean_sum_windows_mora": 34.278202056884766,
+    "mean_whole_mora": 36.459197998046875,
+    "threshold_B1": 0.25,
+    "exceeds_B1": true
+  },
+  "D2": {
+    "silence_mora": {
+      "count": 500,
+      "mean": 0.0043483274057507515,
+      "median": 0.004348327871412039,
+      "p90": 0.004348327871412039,
+      "max": 0.004348327871412039,
+      "std": 4.656612873077393e-10
+    },
+    "musan_noise_mora": {
+      "count": 500,
+      "mean": 0.10203587263822556,
+      "median": 0.002661780221387744,
+      "p90": 0.210591658949852,
+      "max": 6.916294574737549,
+      "std": 0.444158673286438
+    },
+    "musan_noise_rms": {
+      "count": 500,
+      "mean": 0.12490309029817581,
+      "median": 0.08532007038593292,
+      "p90": 0.2883320152759552,
+      "max": 0.8408751487731934,
+      "std": 0.1270894855260849
+    },
+    "dev_speech_rms_median": 0.057494208216667175,
+    "musan_noise_rms_matched_mora": {
+      "count": 500,
+      "mean": 0.18200552463531494,
+      "median": 0.001022315351292491,
+      "p90": 0.260423868894577,
+      "max": 8.100038528442383,
+      "std": 0.7523703575134277
+    },
+    "value_for_threshold_mora": 0.10203587263822556,
+    "threshold_B2": 1.0,
+    "exceeds_B2_silence": false,
+    "exceeds_B2_musan_noise": false,
+    "exceeds_B2": false
+  },
+  "D3": {
+    "pairs": 500,
+    "gap_sec": 0.2,
+    "abs_error_mora_per_sec": {
+      "count": 500,
+      "mean": 0.030511684715747833,
+      "median": 0.01720130816102028,
+      "p90": 0.07289715111255646,
+      "max": 0.35344332456588745,
+      "std": 0.04271745681762695
+    },
+    "signed_diff_mora_mean": 0.13836999237537384,
+    "abs_diff_mora": {
+      "count": 500,
+      "mean": 0.2661494016647339,
+      "median": 0.13842444121837616,
+      "p90": 0.5975956320762634,
+      "max": 3.3001198768615723,
+      "std": 0.38663163781166077
+    },
+    "mean_total_sec": 9.352112770080566,
+    "mean_gap_mora": 0.001872498425655067,
+    "threshold_B5": 0.25,
+    "exceeds_B5_own_threshold": false
+  },
+  "mps_cpu_fallback_events": [],
+  "output_json": "runs/exp003/window_diagnostics.json"
+}
