@@ -37,7 +37,8 @@ dev_noisy は `configs/eval/dev_noisy.yaml`（実装は `src/spkrate/eval/noisy.
 - 対象: `configs/splits/dev.json` の全件（dev と同じクリップ、同じ正解）。`configs/splits/test.json` は使わない
 - 条件: SNR 5・10・15dB の3条件。各条件で dev 全件に「固定の残響 → MUSAN noise の重畳」を掛ける（dev 全件 × 3条件）。適用順はデータ拡張（`augment_waveform`）と同じ「残響 → 雑音」で、雑音は残響を受けない。正解のモーラ数と区間長は dev と同じ（雑音も残響も発話を消さず、残響は長さと時刻を変えない）
 - 乱数の種: 20260924（設定の `seed`）
-- 雑音の選び方: クリップごとに乱数生成器 `numpy.random.default_rng([seed, clip_key])` を作る。`clip_key` は clip_id の SHA-256 の先頭8バイトを整数にしたもの（評価順や件数の絞り込みに依存しない）。この生成器で MUSAN noise（`data/musan` の `noise`。パス順に固定）から1ファイルを一様に選び、切り出し位置を一様に選ぶ（クリップより短い雑音は繰り返して埋める。`spkrate.data.augment.MusanNoiseSource.sample`）。雑音ファイルと切り出し位置は SNR に依存しない（3条件で同じ雑音を使い、SNR だけが異なる）
+- 雑音の選び方: クリップごとに乱数生成器 `numpy.random.default_rng([seed, clip_key])` を作る。`clip_key` は clip_id の SHA-256 の先頭8バイトを整数にしたもの（評価順や件数の絞り込みに依存しない）。この生成器で MUSAN noise の評価用（`data/musan` の `noise` のうち、設定の `musan_noise_split`＝`configs/splits/musan_noise.json` の `eval` 186ファイル。パス順に固定。「学習データ」節の「MUSAN noise の学習用・評価用の分割」）から1ファイルを一様に選び、切り出し位置を一様に選ぶ（クリップより短い雑音は繰り返して埋める。`spkrate.data.augment.MusanNoiseSource.sample`）。雑音ファイルと切り出し位置は SNR に依存しない（3条件で同じ雑音を使い、SNR だけが異なる）
+- 分割の指定: 設定に `musan_noise_split` が無ければ評価の開始前に停止する。2026-09-25 の分割の導入より前に記録した dev_noisy の値（exp004 まで）は、分割前の全930ファイルから雑音を選んだ値であり、学習に使った雑音を含む。exp004 は全雑音ファイルで学習済みのため再評価しない。分割は次に学習するモデルから適用する
 - SNR: 残響後のクリップ全体の実効値に対する雑音の実効値の比（`spkrate.data.augment.add_noise`）
 - 残響: 次の固定値から pyroomacoustics の ShoeBox（鏡像法）で1本だけ作るインパルス応答。乱数を使わない。最大値の絶対値で1に正規化し、直接音の位置で揃えて元の長さに切る（`spkrate.data.augment.apply_reverb`。発話の時刻と長さは変えない）
 
@@ -83,13 +84,29 @@ dev_noisy は `configs/eval/dev_noisy.yaml`（実装は `src/spkrate/eval/noisy.
 
 ## 学習データ
 
+### MUSAN noise の学習用・評価用の分割
+
+- 理由: 学習時と評価時に同じ雑音ファイルを使うと、雑音下評価が学習で聞いた雑音での値になり、未知の雑音への頑健さを測れないため
+- 内容: `data/musan/noise` 以下の wav（930ファイル）をファイル単位で学習用（`train`）と評価用（`eval`）に分け、`configs/splits/musan_noise.json` に固定する。生成は `scripts/build_musan_noise_split.py`、実装は `src/spkrate/data/musan_split.py`
+- 比率: 学習8対評価2。取得元の区分（`noise` 直下のサブディレクトリ）ごとに比率を保つ。区分ごとにパスで整列し、`numpy.random.default_rng([seed, 区分の番号（区分名の整列順、0始まり）])` の並べ替えの先頭 round(件数 × 0.2) 件を評価用、残りを学習用とする。乱数の種は 20260925（分割ファイルの `seed`）
+
+| 区分 | 学習用 | 評価用 | 計 |
+| --- | --- | --- | --- |
+| free-sound | 674 | 169 | 843 |
+| sound-bible | 70 | 17 | 87 |
+| 計 | 744 | 186 | 930 |
+
+- 使い分け: データ拡張の雑音重畳と、無音・雑音のみのサンプル（MUSANの雑音のみ・極小音量の雑音）は学習用だけを使う。dev_noisy（「評価指標」節）と診断 D2 の雑音窓（「診断指標」節）は評価用だけを使う
+- 設定: 分割ファイルのパスは各設定で指定する。学習設定の `augment.musan_noise_split`・`silence_samples.musan_noise_split`、dev_noisy の設定（`configs/eval/dev_noisy.yaml`）の `musan_noise_split`、診断の `scripts/window_diagnostics.py` の `--musan-noise-split`。MUSAN noise を使う経路で指定が無い場合は、学習・評価の開始前に停止する
+- 適用範囲: 次に学習するモデルから適用する。分割の導入より前の設定（`configs/exp00*.yaml`）は記録として書き換えないため、そのまま学習（再開を含む）に使うと開始前に停止する。exp004 までのモデルは全930ファイルで学習した
+
 ### 無音・雑音のみのサンプル（正解モーラ数0）の追加
 
 - 理由: 学習データに無音が含まれず、無音付近でのモデル出力が制約されていないため（「無音は0モーラ」を学習で直接教える。診断D2が測る性質）
 - 内容: 正解モーラ数0のサンプルを学習データに追加する。種類は次の3つ
   - デジタル無音（全標本0）
-  - MUSANの雑音のみ（`data/musan/noise`。発話を含まない）。振幅は元ファイルのまま（D2の雑音窓と同じ作り方）
-  - 極小音量の雑音: MUSAN noise の切り出しを、実効値が指定範囲（dBFS、満振幅1.0基準）の一様乱数になるよう縮めたもの
+  - MUSANの雑音のみ（`data/musan/noise` の学習用。発話を含まない）。振幅は元ファイルのまま（D2の雑音窓と同じ作り方。ただしD2は評価用を使う）
+  - 極小音量の雑音: MUSAN noise（学習用）の切り出しを、実効値が指定範囲（dBFS、満振幅1.0基準）の一様乱数になるよう縮めたもの
 - 検証（dev）・テストには追加しない
 - 設定: 学習設定の `silence_samples` 節（実装は `src/spkrate/train/silence.py`）。拡張（`augment.enabled`）とは独立に有効化でき、`data.source` が `features`・`waveform` のどちらでも使える
 
@@ -101,10 +118,11 @@ dev_noisy は `configs/eval/dev_noisy.yaml`（実装は `src/spkrate/eval/noisy.
 | `quiet_noise_dbfs_range` | `[-90, -60]` | 実測で −90dBFS の白色雑音の対数メル平均は −13.5（デジタル無音 log(1e-6) = −13.8 とほぼ同じ）、−60dBFS で −8.4。学習データ全体の平均 −7.3（configs/normalization.yaml）との間を埋める。これより大きい音量は元の振幅のMUSAN雑音が受け持つ |
 | `duration_range_sec` | `null`（学習クリップの長さの分布から復元抽出） | 方式Aでは出力がフレームの総和なので、長さの分布が違うと長さ自体が正解0の手掛かりになる。長さは構築時に件ごとに固定し、中身（雑音の選択・位置・音量）はエポックごとに変える |
 | `musan_root` | `data/musan` | data/DATASETS.md の配置先 |
+| `musan_noise_split` | なし（MUSANを使う場合は必須） | 学習用（`train`）だけを使うための分割ファイル（通常 `configs/splits/musan_noise.json`） |
 
 - 特徴量・正規化: 本仕様の対数メル（`LogMelSpectrogram`）と configs/normalization.yaml の固定値で、その場で計算する。`data.source` が `features` のときは、事前計算特徴量と同じく対数メルを一度float16に丸めてから使う
 - 拡張は掛けない（拡張が有効でも）。理由: (1) 元が無音・雑音なので拡張で多様性がほとんど増えない（デジタル無音への雑音重畳はSN比が定義できず何もしない）、(2) 音量変化が極小音量の雑音を設定した範囲の外へ動かし、ログの記録と実際の入力が食い違う、(3) エポックごとの拡張の実適用率は発話クリップに対する率として読むものである（無音サンプルは分母から除く）、(4) 拡張の有無の比較に無音サンプルの違いが混ざらない
-- 学習開始前の検査: 割合・内訳・範囲の不正、MUSANが必要なのに `musan_root` に `noise` の wav が無い場合は、データ読み込みより前に停止する
+- 学習開始前の検査: 割合・内訳・範囲の不正、MUSANが必要なのに `musan_root` に `noise` の wav が無い場合・`musan_noise_split` が無い場合は、データ読み込みより前に停止する
 - 記録: 学習開始時の log.txt に追加の有無・割合・内訳比・極小音量の範囲・長さの決め方と、3種それぞれの件数を書く。`metrics.jsonl` の `train_silence_clips` にエポックごとの件数、`config_snapshot.yaml` の `dataset.silence_counts` に3種の件数を残す
 
 ## 診断指標
@@ -137,7 +155,7 @@ dev_noisy は `configs/eval/dev_noisy.yaml`（実装は `src/spkrate/eval/noisy.
 
 - 入力: 次の2種、各500本の2.0秒窓（32,000標本）。出典: 005 4.3節
   - デジタル無音（全標本0）の窓500本。500本はすべて同一の入力である（既存のdocsに定義なし（実装から読み取った））
-  - MUSAN noise のみ（音声を含まない）の窓500本。`data/musan/noise` 以下の wav（パス順に固定）から1ファイルを一様に選び、無作為な位置から2.0秒を切り出す（2.0秒より短いファイルは繰り返して埋める）。乱数の種は 20260921+1。振幅は元ファイルのままで音量をそろえない（既存のdocsに定義なし（実装から読み取った）。005は音量を指定していない。`MusanNoiseSource.sample`、`fit_noise`）
+  - MUSAN noise のみ（音声を含まない）の窓500本。`data/musan/noise` 以下の wav のうち評価用（`--musan-noise-split` で指定する分割ファイルの `eval`。パス順に固定。指定が無ければモデルの読み込み前に停止する。2026-09-25 の分割の導入より前の D2（exp001・exp002）は全930ファイルから選んだ値）から1ファイルを一様に選び、無作為な位置から2.0秒を切り出す（2.0秒より短いファイルは繰り返して埋める）。乱数の種は 20260921+1。振幅は元ファイルのままで音量をそろえない（既存のdocsに定義なし（実装から読み取った）。005は音量を指定していない。`MusanNoiseSource.sample`、`fit_noise`）
 - 値: 各種について予測モーラ数の500本平均。単位は mora（2.0秒あたり）。中央値・最大・標準偏差も記録する。
   - B2との比較は無音・MUSAN noise のそれぞれで行い、併せて2種の平均のうち大きい方も記録する（既存のdocsに定義なし（実装から読み取った）。005は2種の結果をどう1つの値にまとめるかを定めていない）
   - 参考値として、同じ雑音窓を D1 標本の dev 音声の実効値の中央値にそろえて推論した平均も記録する。これは005の定義には無い追加測定であり、閾値の判定には使わない
