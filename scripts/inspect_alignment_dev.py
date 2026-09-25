@@ -11,6 +11,7 @@ data/processed/clips.jsonl。音声は読まない。結果は JSON で標準出
 - 極端なモーラの閾値は、モーラ間隔の対数の分布から頑健に定める:
   中央値 ± 3 × (1.4826 × MAD)（対数領域）。区間長は約9割が1フレームで MAD が0になり
   下側の閾値が定義できないため、区間長の「極端に長い」には同じ上側閾値（間隔の上限）を使う
+- 先頭・末尾のモーラの孤立: 最初の2モーラ・最後の2モーラの開始時刻の差の分布
 - 先頭の無音（speech_start）と末尾の無音（duration_sec - speech_end）の分布
 
 configs/splits/test.json は使わない。
@@ -95,6 +96,8 @@ def main() -> int:
     trail: list[float] = []
     per_clip_max_interval: list[float] = []
     per_clip_max_dur: list[float] = []
+    first_iv: list[float] = []  # 1番目→2番目のモーラの開始時刻の差（先頭モーラの孤立を見る）
+    last_iv: list[float] = []  # 最後から2番目→最後のモーラの開始時刻の差
     frame_mismatch_dur = 0
     for r in ok:
         m = r["moras"]
@@ -104,6 +107,9 @@ def main() -> int:
         iv = np.diff(starts)
         intervals.extend(iv.tolist())
         per_clip_max_interval.append(float(iv.max()) if iv.size else float("nan"))
+        if iv.size:
+            first_iv.append(float(iv[0]))
+            last_iv.append(float(iv[-1]))
         per_clip_max_dur.append(float(d.max()))
         lead.append(r["speech_start"])
         trail.append(r["duration_sec"] - r["speech_end"])
@@ -161,6 +167,12 @@ def main() -> int:
         "clip_frac_any_duration_above_high": frac_gt(np.array(per_clip_max_dur), hi),
         "clip_frac_any_interval_above_1s": frac_gt(pcm_max_iv, 1.0),
         "clip_max_interval_sec": pct(pcm_max_iv),
+        "first_interval_sec": pct(np.array(first_iv)),
+        "last_interval_sec": pct(np.array(last_iv)),
+        "first_interval_frac_above_high": frac_gt(np.array(first_iv), hi),
+        "last_interval_frac_above_high": frac_gt(np.array(last_iv), hi),
+        "first_interval_frac_above_1s": frac_gt(np.array(first_iv), 1.0),
+        "last_interval_frac_above_1s": frac_gt(np.array(last_iv), 1.0),
         "lead_silence_sec": pct(lead_a),
         "trail_silence_sec": pct(trail_a),
         "lead_frac_lt_0.05": frac_lt(lead_a, 0.05),
