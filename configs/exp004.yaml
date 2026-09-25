@@ -1,0 +1,68 @@
+# 無音・雑音サンプル（silence_samples）を加えた学習・拡張あり（exp003 との比較対象）。
+# 実装: src/spkrate/train/train.py / src/spkrate/train/data.py / src/spkrate/train/silence.py /
+#       src/spkrate/data/augment.py
+#
+# 実行（リポジトリ直下から）:
+#   PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m spkrate.train.train --config configs/exp004.yaml
+#
+# ## exp002（configs/exp002.yaml）との差分と理由
+#
+# exp003（拡張なし）との違いは拡張の有無（とそれに伴う data.source）だけにする。
+# 拡張の設定（augment.enabled: true、AugmentConfig 既定値、musan_root: data/musan）・
+# モデル構造・損失(mse)・学習率(1e-4)・重み減衰・勾配の上限・バッチ(64)・num_workers(4)・
+# バケッティング・シード・検証の設定・best_metric は exp002 と同じ。
+#
+# - silence_samples: 追加（enabled: true、それ以外は既定値。割合0.03、3種等分、
+#     極小音量 -90〜-60dBFS、長さは学習クリップの分布から。無音サンプルには拡張を掛けない。
+#     docs/spec.md「学習データ」）
+# - resume_from: runs/exp002/checkpoint_last.pt（エポック6、optimizer_state あり）から再開する。
+#     エポックは7から数える。最良値は引き継がず測り直す（train.py docstring）。
+# - train.epochs: 6 を削除し、train.max_epochs: 30（通算の上限）と
+#   train.early_stopping_patience: 5 を追加（dev の mae_moras_per_sec が5エポック連続で
+#   改善しなければ終了）。
+# - notes と experiment_id のみ文言が異なる。
+#
+# test.json は使わない。検証は configs/splits/dev.json のみ。
+
+experiment_id: exp004
+seed: 20260921
+device: mps          # CLAUDE.md「学習デバイスはmps」
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: silence_samples 有効（既定値）・拡張あり（exp002 と同一）。exp002 の checkpoint_last.pt から再開、早期終了（patience 5、上限30）
+resume_from: runs/exp002/checkpoint_last.pt
+
+data:
+  source: waveform       # 拡張は波形に掛けるので波形から都度メルを計算する
+  dev_source: features   # 検証は事前計算特徴量・拡張なし
+  features_dir: data/processed/features
+  train_split: configs/splits/train.json
+  dev_split: configs/splits/dev.json     # 検証は dev のみ
+  max_train_clips: null  # 学習データは全件
+  max_dev_clips: null    # 全29,518件で毎エポック評価する
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+augment:
+  enabled: true
+  musan_root: data/musan   # 雑音源は data/musan/noise
+
+silence_samples:
+  enabled: true      # それ以外は既定値
+  musan_root: data/musan
+
+train:
+  max_epochs: 30                  # 通算の上限（exp002 のエポック6の続きから）
+  early_stopping_patience: 5      # dev の mae_moras_per_sec が5エポック連続で改善しなければ終了
+  batch_size: 64
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 4
+  bucketing: true
+  bucket_pool_batches: 20
+  best_metric: mae_moras_per_sec
+  log_interval: 200
+  # results/metrics.csv への追記は学習後の評価で行う。
+  record_metrics_csv: false
