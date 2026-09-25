@@ -196,3 +196,7 @@
 - results/loss_mae_trajectory.md：val_loss悪化かつ全体MAE改善の区間は23組中1件（epoch10→11）のみ、帯別ではunder4/4to6/over8が減少・6to8のみ増加（+0.005138）。val_lossとmae_moras_per_secの相関r=0.9534。
 - 上記3件とも既存ログ（metrics.jsonl・predictions_best.json）のみで算出し、再学習・追加推論は行っていない。第7段階には進んでいない。
 - 別プロセスとしてexp004（拡張あり、exp002から再開）の学習が本セッション外でバックグラウンド実行中（このセッションでは開始・変更していない）。
+- docs/experiments/008-convergence-comparison.md：exp003とexp004を比較し、基準構成をexp004（無音サンプル＋拡張）とする結論（承認待ち）。dev_noisyまとめMAE 0.5956 vs 2.5053、noisyの1.0未満 562 vs 17,605件、clean MAE差0.0037。
+- 無音出力はexp003が良い（D2デジタル無音 0.0043 vs 0.5227モーラ）。exp004は上限30で終了（未収束の可能性）。
+- MUSAN noiseの930ファイルはdev_noisy・D2・exp004拡張・両者の無音サンプルで共通（分割なし）をコードで確認。noisy指標はexp004に有利に偏りうる。
+- 方式B移行判定は保留、第7段階には進んでいない。学習・推論は行っていない（既存予測の再集計のみ）。
