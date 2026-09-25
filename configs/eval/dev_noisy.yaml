@@ -7,7 +7,8 @@
 #   （dev 全件 × 3条件。適用順は拡張 augment_waveform と同じ「残響 → 雑音」で、雑音は残響を受けない）
 # - 雑音の選び方: クリップごとに乱数生成器 numpy.random.default_rng([seed, clip_key]) を作る。
 #   clip_key は clip_id の SHA-256 の先頭8バイトを整数にしたもの（評価順や件数の絞り込みに依存しない）。
-#   この生成器で MUSAN noise（パス順に固定）から1ファイルを一様に選び、切り出し位置を一様に選ぶ
+#   この生成器で MUSAN noise の評価用（musan_noise_split の eval。パス順に固定）から1ファイルを
+#   一様に選び、切り出し位置を一様に選ぶ
 #   （クリップより短い雑音は繰り返して埋める。spkrate.data.augment.MusanNoiseSource.sample）。
 #   雑音ファイルと切り出し位置は SNR に依存しない（3条件で同じ雑音を使い、SNR だけが異なる）
 # - SNR: 残響後のクリップ全体の実効値に対する雑音の実効値の比（spkrate.data.augment.add_noise）
@@ -21,6 +22,9 @@ snr_db: [5, 10, 15]
 # 相対パスはリポジトリ直下から解決する
 musan_root: data/musan
 musan_subsets: [noise]
+# MUSAN noise の学習用・評価用の分割（2026-09-25）。dev_noisy は評価用（eval）だけを使う。
+# 指定が無いと評価の開始前に止まる。exp004 までの dev_noisy の値は分割前の全930ファイルでの値
+musan_noise_split: configs/splits/musan_noise.json
 reverb:
   room_dim_m: [6.0, 4.5, 2.7]
   # Sabine の式の逆算で壁の吸音率を決めるときの目標残響時間（秒）
