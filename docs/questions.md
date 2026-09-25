@@ -85,3 +85,9 @@ pyopenjtalkの実測に関する注記
 2. 拡張を1種類だけ外す実験: 拡張ごとに個別の enabled フラグを持たせる。`augment.enabled` が true のとき、個別の拡張が false であってもエラーにしない
 3. docs/spec.md の範囲外の値（`time_stretch_range`、`snr_db_range` など）: エラーで止める。範囲を変えたい場合は、先に docs/spec.md を更新する
 4. 残響の既定の範囲: 変更しない。ただし学習開始時のログに、各拡張の設計上の確率と実際の適用率の両方を記録する
+
+### 2026-09-25 収束比較（008）で生じた確認事項
+
+1. 008 の結論（以後の基準構成を exp004 とする）の承認。docs/experiments/008-convergence-comparison.md
+2. MUSAN noise の930ファイルを、学習（拡張・無音サンプル）と評価（dev_noisy・D2）で分けずに使っている。雑音ファイルを学習用と評価用に分割するか
+3. docs/spec.md の評価指標に dev_noisy（雑音下評価）と推論時間の新しい測定規則（docs/decisions/007-latency-measurement.md）を加えるか
