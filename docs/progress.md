@@ -209,3 +209,8 @@
 ### 2026-09-25 実装: 指示書タスク1（spec.md に dev_noisy と推論時間の測定規則を追記）
 - spec.md に「評価指標」節を新設し、configs/eval/dev_noisy.yaml（SNR 5/10/15dB、固定残響、種 20260924、3条件のまとめ dev_noisy_all）と 007 の測定規則を値・手順を変えずに転記した。冒頭の評価指標の項から参照を付けた。
 - 実装（noisy.py・augment.py・runner.py・latency.py）と記述の食い違いは無かった。pytest 552件通過。
+
+### 2026-09-25 実装: 指示書タスク2（MUSAN noise の学習用・評価用の分割）
+- data/musan/noise の930ファイルを区分ごとに8対2で分け configs/splits/musan_noise.json に固定した（種 20260925。学習用 free-sound 674・sound-bible 70、評価用 169・17）。生成は scripts/build_musan_noise_split.py。
+- 雑音重畳・無音サンプルは学習用、dev_noisy・D2 は評価用だけを読む。分割の指定が無ければ開始前に停止する。dev_noisy.yaml に musan_noise_split を追加し、spec.md に反映した。pytest 566件通過。
+- configs/exp00*.yaml は書き換えていないため、過去の設定のまま学習・再開すると停止する。exp004 の dev_noisy は再評価していない。
