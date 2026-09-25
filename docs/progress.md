@@ -219,3 +219,7 @@
 - 採用: ひらがなCTC（vumichien/wav2vec2-large-xlsr-japanese-hiragana、Apache-2.0、rev 017225b）＋ torchaudio.functional.forced_align。次点 MMS_FA（CC-BY-NC、ローマ字変換で dev 63件が変換不能）。Julius・MFA は uv で導入できず除外。transformers 5.17.0 を依存に追加。
 - dev 20件（話速帯ごと5件）で両候補とも20/20成功、モーラ数はラベルと全件一致。1件約0.107秒（読み込み込み）、dev 29,518件で約53分。候補間の境界差は中央値20ms。
 - 不一致・失敗は除外して理由別に記録する。出力はピーク状（9割が1フレーム）で、窓の計数はモーラ中点で行うことを推奨。詳細は docs/decisions/008-forced-alignment.md。
+
+### 2026-09-26 実装: 指示書タスク4-1（強制アライメントの実装）
+- src/spkrate/labels/alignment.py（モーラ分割・トークン化・forced_align・区間化・008の理由コードでの除外・JSONL書き出しと再開）と入口 scripts/align_dev.py を追加。tests/test_alignment.py 35件（実モデル1件は重み未取得時 skip）。
+- dev 20件（種20260925）で20/20成功、1件0.082秒（読み込み込み、mps）。CPUフォールバック警告なし。uv run pytest 601件通過。dev 全件の実行（4-2）は未実施。
