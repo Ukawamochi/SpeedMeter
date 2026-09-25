@@ -17,3 +17,6 @@ runs/
 # results/alignment_check/ の音声（タスク4-2）。Common Voice は再共有禁止のため追跡しない。
 # ラベル（.txt）・index.tsv・README.md・record.md はテキストなのでコミットする。
 /results/alignment_check/*.wav
+
+# 人間の聴取用に音量をそろえた音声のコピー（Common Voice は再共有禁止）
+/listening/*/
