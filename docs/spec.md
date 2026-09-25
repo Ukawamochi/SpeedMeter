@@ -21,7 +21,7 @@
 - 正規化: 学習データ全体から算出した平均と標準偏差を固定値として使う。値はconfigsに記録する。発話ごとの正規化は行わない
 - モデル構造: 周波数方向を圧縮する2次元畳み込み層 → 時間方向の膨張畳み込み層 → フレームごとのsoftplus出力 → 時間方向の総和
 - 損失: 二乗誤差とポアソン損失を比較する
-- 評価指標: 毎秒モーラ数の平均絶対誤差、話速帯別（4未満、4以上6未満、6以上8未満、8以上）の平均絶対誤差、予測値と正解の相関係数、1推論あたりの処理時間、モデルのファイルサイズ（雑音下評価 dev_noisy の定義と処理時間の測定規則は「評価指標」節）
+- 評価指標: 毎秒モーラ数の平均絶対誤差、話速帯別（4未満、4以上6未満、6以上8未満、8以上）の平均絶対誤差、予測値と正解の相関係数、1推論あたりの処理時間、モデルのファイルサイズ（雑音下評価 dev_noisy の定義と処理時間の測定規則は「評価指標」節、窓単位の評価 dev_window は「窓単位の評価」節）
 - 分割: 話者単位で学習・検証・テストに分ける。分割はconfigs/splits/に固定する
 - 使用データセット: Common Voice日本語（主）、JSUT、JVS（補助および検証）、MUSAN（雑音重畳）、pyroomacousticsによる合成残響
 - データ拡張: 時間伸縮0.7〜1.5倍（音程保持、モーラ数は不変）、雑音重畳SNR0〜20dB、合成残響、音量変化、帯域制限。時間方向のマスクは正解と矛盾するため禁止
@@ -81,6 +81,63 @@ dev_noisy は `configs/eval/dev_noisy.yaml`（実装は `src/spkrate/eval/noisy.
   - 比較の読み出しは `spkrate.eval.latency.compare_latency(csv, [実験ID...])` で行う。指定した全実験を含むセッションのうち最新のものを使い、そのようなセッションが無い場合はエラー（`LatencySessionMismatchError`）にする
 - 精度評価（`scripts/eval_dev_full.py`: dev・dev_noisy）と推論時間の測定（`scripts/measure_latency.py`）は別の入口とする。精度評価の行に入る旧方式の時間は参考値である
 - **比較に使う推論時間は、比較対象の全モデルを1回の `measure_latency.py` で測った、`latency_session_id` 付きの新方式の値（中央値・最大値）に限る。** 比較対象のモデルが増えたら、既存のモデルも含めて全部を1つのセッションで測り直す（過去のセッションの値と並べない）
+
+## 窓単位の評価
+
+推論時の入力単位（2.0秒窓・0.25秒間隔）で精度を測る評価セット dev_window の定義、主指標の除外規則、窓単位の目標値を定める（2026-09-26 の人間による仕様変更の指示。docs/directives/2026-09-26.md 0節の2・3）。
+定義は `configs/eval/dev_window.yaml`、`configs/eval/no_speech.yaml`、`results/dev_window_build.md`、`results/window_eval.md`、`docs/experiments/009-window-eval.md`（以下「009」）から転記したものである。実装は `src/spkrate/eval/dev_window.py`（生成・波形の再生成）、入口は `scripts/build_dev_window.py`（生成）と `scripts/eval_dev_window.py`（評価と記録）、集計は `src/spkrate/eval/window_eval.py`。
+
+### dev_window の定義
+
+- 対象: `configs/splits/dev.json` の話者のクリップ（`data/processed/clips.jsonl`、アライメントは `data/processed/alignments/dev.jsonl`）。`configs/splits/test.json` は使わない
+- 窓: 長さ2.0秒（32,000標本）の窓を0.25秒（4,000標本）ずつずらす。窓の開始は 0, 0.25, 0.5, … 秒で、音声の中に窓全体が収まるものだけを取る（詰め物をしない。末尾の端数は捨てる。`src/spkrate/eval/window_diag.py` の `split_into_windows` と同じ規約）。したがって2.0秒未満のクリップは単一クリップの窓を持たない（連続発話の組には使う。2026-09-26 の人間の回答により、無音を足して単一クリップの評価に含める処理は加えない）
+- 正解（按分）: 窓 [t, t + 2.0) の正解 = Σ（モーラ区間 [start, end] のうち窓内に入る長さ ÷ (end − start)）。end <= start の区間は点とみなし、t <= start < t + 2.0 なら1、それ以外は0とする。計算は float32
+- 単一クリップ（kind=single）: 除外（下記）の後の各クリップを音源にして窓を切る
+- 連続発話（kind=concat）: 同一話者（client_id）の除外後のクリップを、無音（全標本0）を挟んで連結した音声上で窓を切る。組の作り方（`build_concat_groups`）:
+  1. 話者ごとに clip_id 順に並べ、`numpy.random.default_rng([seed, clip_key(client_id)])` の `permutation` で並べ替える（`clip_key` は dev_noisy と同じ SHA-256 の先頭8バイト）
+  2. 残りが3件以上のあいだ、件数 k を3〜5（両端を含む）の整数一様乱数で引き（残りより多ければ残り全部）、先頭から k 件を1組にする。続けて k − 1 個の無音長を 0.3〜1.5秒の一様乱数（`Generator.uniform(0.3, 1.5)`）で引き、0.01秒単位に丸める
+  3. 各クリップは高々1回使う。3件に満たない残りと、除外後のクリップが3件未満の話者は連結に使わない
+  - 正解は各クリップのモーラ時刻を、連結音声内でのそのクリップの開始位置（先行クリップの長さと無音長の和）だけずらして同じ按分で数える。クリップ自身の前後の無音はそのまま残る
+  - 乱数の種: 20260927（設定の `seed`）。単一クリップの窓は種に依存しない
+- 端の孤立の除外: アライメント失敗（ok=false）と、先頭2モーラまたは末尾2モーラの開始時刻の差が1.0秒を**超える**（>）クリップ（設定の `isolation_threshold_sec`。results/alignment_dev.md 3.4節）を、単一クリップからも連続発話の組からも除く（組はこの除外の後に作る）
+- known_no_speech の印: `results/error_cases/to_listen.tsv` の clip_id（人間の聴取で発話が聞き取れないと確定した37件）を由来に持つ単一クリップの窓と、1件でも含む連結の組のすべての窓に `known_no_speech` の印を付ける。dev_window からは除かない（主指標の集計で除く）
+- 雑音下の版: 設定の `noisy` 節（`configs/eval/dev_noisy.yaml` と同じ値。SNR 5・10・15dB、固定残響、乱数の種 20260924、MUSAN noise は `configs/splits/musan_noise.json` の評価用のみ）。音源（単一クリップまたは連結音声）の**全体**に dev_noisy と同じ加工（固定残響 → MUSAN noise の重畳。`spkrate.eval.noisy.degrade_waveform`）を掛けてから窓を切る。SNR は音源全体の実効値に対する比。雑音の乱数生成器の鍵は、単一クリップは clip_id（dev_noisy のそのクリップと同じ雑音になる）、連続発話は `"concat:" + clip_id を "+" でつないだ文字列`
+- 保存形式: 窓の定義だけを保存し（`data/processed/dev_window/`、Git管理外）、波形は評価時に決定的に再生成する
+
+### 指標と主指標の除外規則
+
+- 窓の毎秒モーラ数 = 窓内のモーラ数 ÷ 2.0秒。MAE・相関係数は `spkrate.eval.metrics.compute_metrics` と同じ定義。偏り = 出力 − 正解の平均（毎秒モーラ数。負なら過小）
+- 話速帯は窓の**正解の**毎秒モーラ数による4帯（4未満・4以上6未満・6以上8未満・8以上）。正解0の窓は「4未満」に入る
+- 雑音下の3条件まとめ: 3条件の窓を1つにまとめて計算した値（dev_noisy_all に倣う）
+- **主指標（除外後）**: 次のいずれかのクリップを由来に持つ窓を除いた値。単一クリップの窓と、そのクリップを1件でも含む連結の組のすべての窓が対象
+  - known_no_speech: `results/error_cases/to_listen.tsv` の37件
+  - no_speech_suspect: `configs/eval/no_speech.yaml` の規則に該当する dev のクリップ（`results/no_speech_suspect_dev.tsv`）。規則は次の条件の論理積（実装は `src/spkrate/eval/no_speech.py`、指標の計算は `scripts/detect_no_speech.py`、根拠は results/no_speech_detection.md）
+
+| 指標 | 条件 |
+| --- | --- |
+| `frame_db_p90`: 20ms フレームの実効値（dBFS）の90%点 | <= −25.5 |
+| `frame_db_range`: 同じく95%点 − 10%点（dB） | <= 33.3 |
+| `cer`: ひらがなCTCの貪欲デコードと正解のかなとの文字誤り率 | >= 0.4 |
+
+- **全窓**: 除外しない値。主指標と併記する
+
+### 窓単位の目標値
+
+必達の目標は、**clean・主指標**の dev_window での毎秒モーラ数の MAE で次のとおりとする（009 3.2節の案。8以上は別案の1.40を採らない）。
+
+| 帯 | 目標（MAE、以下） |
+| --- | ---: |
+| 4未満 | 0.70 |
+| 4以上6未満 | 0.60 |
+| 6以上8未満 | 0.60 |
+| 8以上 | 0.90 |
+| 全体 | 0.70 |
+
+補助の目標と条件（未達でも採否を決める根拠にはせず、記録と比較に使う）:
+
+- 雑音下（3条件まとめ、主指標）の MAE: clean の目標の1.5倍（4未満 1.05・4以上6未満 0.90・6以上8未満 0.90・8以上 1.35・全体 1.05。009 3.4節）。1.5倍は測定に基づく値ではない
+- 全体の偏りの絶対値: 0.25 以下（毎秒モーラ数。009 3.3節）
+- 正解0の窓の出力の平均: 0.5 モーラ（2.0秒あたり）以下（009 3.3節）
 
 ## 学習データ
 
