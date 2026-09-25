@@ -1,0 +1,57 @@
+# 窓単位の評価セット dev_window の定義（docs/directives/2026-09-25.md タスク5-1）。
+# 実装: src/spkrate/eval/dev_window.py（生成・波形の再生成）、scripts/build_dev_window.py（入口）
+# 記録: results/dev_window_build.md。出力は data/processed/dev_window/（Git管理外）
+#
+# ## 構成
+# - 対象: configs/splits/dev.json の話者のクリップ（data/processed/alignments/dev.jsonl にある分）。
+#   test.json は使わない
+# - 窓: 長さ window_sec の窓を hop_sec ずつずらす（docs/spec.md の入力単位2.0秒・推論間隔0.25秒）。
+#   窓の開始は 0, hop, 2hop, ... で、音声の中に窓全体が収まるものだけを取る（詰め物をしない。
+#   末尾の端数は捨てる。src/spkrate/eval/window_diag.py の split_into_windows と同じ規約）。
+#   したがって window_sec 未満のクリップは単一クリップの窓を持たない（連続発話の組には使う）
+# - 正解: 窓 [t, t + window_sec) 内のモーラ数。モーラ区間 [start, end] のうち窓内に入る時間の割合で
+#   按分する。end <= start の区間は点とみなし、t <= start < t + window_sec なら1、それ以外は0
+# - 単一クリップ（kind=single）: 各クリップ上で切り出す
+# - 連続発話（kind=concat）: 同一話者（client_id）のクリップを group_size の範囲の件数だけ、
+#   gap_sec の範囲の無音（全標本0）を挟んで連結した音声上で切り出す。組の作り方は
+#   src/spkrate/eval/dev_window.py の build_concat_groups（話者ごとの乱数生成器
+#   default_rng([seed, clip_key(client_id)]) でクリップを並べ替え、先頭から件数を引いて順に切る。
+#   各クリップは高々1回使う）。無音長は gap_round_sec 単位に丸める
+# - 除外: アライメント失敗（ok=false）と、先頭2モーラまたは末尾2モーラの開始時刻の差が
+#   isolation_threshold_sec を超える（>）クリップ（results/alignment_dev.md 3.4節）。
+#   単一クリップからも連続発話の組からも除く
+# - 印付け（除外しない）: known_no_speech_list の clip_id を由来に持つ窓・組に known_no_speech を付ける
+# - 雑音下の版: noisy 節（configs/eval/dev_noisy.yaml と同じ値）。元の音声（単一クリップまたは
+#   連結音声）全体に dev_noisy と同じ加工（固定残響 → MUSAN noise 評価用の重畳）を掛けてから窓を切る。
+#   雑音の乱数生成器の鍵は、単一クリップは clip_id（dev_noisy と同じ雑音になる）、連続発話は
+#   "concat:" + clip_id を "+" でつないだ文字列
+# - 保存形式: 窓の定義だけを保存し、波形は評価時に決定的に再生成する
+seed: 20260927
+window_sec: 2.0
+hop_sec: 0.25
+sample_rate: 16000
+concat:
+  group_size: [3, 5]   # 両端を含む整数の一様乱数
+  gap_sec: [0.3, 1.5]  # 両端を含む一様乱数を gap_round_sec に丸める
+  gap_round_sec: 0.01
+isolation_threshold_sec: 1.0
+# 相対パスはリポジトリ直下から解決する
+dev_split: configs/splits/dev.json
+clips_jsonl: data/processed/clips.jsonl
+alignments: data/processed/alignments/dev.jsonl
+audio_root: .
+known_no_speech_list: results/error_cases/to_listen.tsv
+output_dir: data/processed/dev_window
+# 雑音下の版。値は configs/eval/dev_noisy.yaml と同じ（tests/test_dev_window.py で一致を確認する）
+noisy:
+  seed: 20260924
+  snr_db: [5, 10, 15]
+  musan_root: data/musan
+  musan_subsets: [noise]
+  musan_noise_split: configs/splits/musan_noise.json
+  reverb:
+    room_dim_m: [6.0, 4.5, 2.7]
+    rt60_sec: 0.5
+    source_pos_m: [2.0, 2.2, 1.5]
+    mic_pos_m: [3.5, 2.6, 1.2]
+    max_order: 30
