@@ -21,11 +21,65 @@
 - 正規化: 学習データ全体から算出した平均と標準偏差を固定値として使う。値はconfigsに記録する。発話ごとの正規化は行わない
 - モデル構造: 周波数方向を圧縮する2次元畳み込み層 → 時間方向の膨張畳み込み層 → フレームごとのsoftplus出力 → 時間方向の総和
 - 損失: 二乗誤差とポアソン損失を比較する
-- 評価指標: 毎秒モーラ数の平均絶対誤差、話速帯別（4未満、4以上6未満、6以上8未満、8以上）の平均絶対誤差、予測値と正解の相関係数、1推論あたりの処理時間、モデルのファイルサイズ
+- 評価指標: 毎秒モーラ数の平均絶対誤差、話速帯別（4未満、4以上6未満、6以上8未満、8以上）の平均絶対誤差、予測値と正解の相関係数、1推論あたりの処理時間、モデルのファイルサイズ（雑音下評価 dev_noisy の定義と処理時間の測定規則は「評価指標」節）
 - 分割: 話者単位で学習・検証・テストに分ける。分割はconfigs/splits/に固定する
 - 使用データセット: Common Voice日本語（主）、JSUT、JVS（補助および検証）、MUSAN（雑音重畳）、pyroomacousticsによる合成残響
 - データ拡張: 時間伸縮0.7〜1.5倍（音程保持、モーラ数は不変）、雑音重畳SNR0〜20dB、合成残響、音量変化、帯域制限。時間方向のマスクは正解と矛盾するため禁止
 - 書き出し: ONNX形式、int8の動的量子化
+
+## 評価指標
+
+冒頭の「評価指標」の項の補足として、雑音下評価セット dev_noisy の定義と、1推論あたりの処理時間の測定規則を定める。
+dev_noisy は `configs/eval/dev_noisy.yaml`（実装は `src/spkrate/eval/noisy.py`、評価と記録は `scripts/eval_dev_full.py`・`src/spkrate/eval/runner.py`）、処理時間は `docs/decisions/007-latency-measurement.md`（以下「007」。実装は `src/spkrate/eval/latency.py`、入口は `scripts/measure_latency.py`）から転記したものである。
+
+### 雑音下評価 dev_noisy
+
+- 対象: `configs/splits/dev.json` の全件（dev と同じクリップ、同じ正解）。`configs/splits/test.json` は使わない
+- 条件: SNR 5・10・15dB の3条件。各条件で dev 全件に「固定の残響 → MUSAN noise の重畳」を掛ける（dev 全件 × 3条件）。適用順はデータ拡張（`augment_waveform`）と同じ「残響 → 雑音」で、雑音は残響を受けない。正解のモーラ数と区間長は dev と同じ（雑音も残響も発話を消さず、残響は長さと時刻を変えない）
+- 乱数の種: 20260924（設定の `seed`）
+- 雑音の選び方: クリップごとに乱数生成器 `numpy.random.default_rng([seed, clip_key])` を作る。`clip_key` は clip_id の SHA-256 の先頭8バイトを整数にしたもの（評価順や件数の絞り込みに依存しない）。この生成器で MUSAN noise（`data/musan` の `noise`。パス順に固定）から1ファイルを一様に選び、切り出し位置を一様に選ぶ（クリップより短い雑音は繰り返して埋める。`spkrate.data.augment.MusanNoiseSource.sample`）。雑音ファイルと切り出し位置は SNR に依存しない（3条件で同じ雑音を使い、SNR だけが異なる）
+- SNR: 残響後のクリップ全体の実効値に対する雑音の実効値の比（`spkrate.data.augment.add_noise`）
+- 残響: 次の固定値から pyroomacoustics の ShoeBox（鏡像法）で1本だけ作るインパルス応答。乱数を使わない。最大値の絶対値で1に正規化し、直接音の位置で揃えて元の長さに切る（`spkrate.data.augment.apply_reverb`。発話の時刻と長さは変えない）
+
+| 項目 | 値 |
+| --- | --- |
+| 部屋の寸法 `room_dim_m` | 6.0 × 4.5 × 2.7 m |
+| 目標残響時間 `rt60_sec`（Sabine の式の逆算で壁の吸音率を決める） | 0.5 秒 |
+| 音源の位置 `source_pos_m` | (2.0, 2.2, 1.5) m |
+| マイクの位置 `mic_pos_m` | (3.5, 2.6, 1.2) m |
+| 鏡像法の最大反射次数 `max_order` | 30 |
+
+  - `max_order` の根拠: Sabine の逆算が返す次数（74）では生成した応答の実測 RT60 が0.71秒と目標より長く、12（学習時の拡張の既定）では0.22秒と短い。30で実測0.51秒（`pyroomacoustics.experimental.measure_rt60`、pyroomacoustics 0.10.1）となり目標に合う
+- 保存形式: 波形を評価のたびに決定的に生成する（事前計算した特徴量は保存しない）。根拠は `src/spkrate/eval/noisy.py` のモジュール docstring
+- 3条件のまとめ: results/metrics.csv には列を増やさず `split` 列の値で行を分けて記録する
+  - `dev_noisy_snr5` / `dev_noisy_snr10` / `dev_noisy_snr15`: SNR 条件ごと
+  - `dev_noisy_all`: 3条件の全区間（dev 件数 × 3）をまとめて計算した指標。平均絶対誤差は各条件の件数が等しいので3条件の平均に一致する。相関係数は3条件をまとめた全区間で計算する
+  - noisy の行の `config_path` は「実験の設定;dev_noisy の設定」のように2つのパスを `;` でつなぐ。1推論あたりの処理時間とモデルサイズは clean（dev）の行と同じ値を書く
+
+### 1推論あたりの処理時間の測定規則
+
+| 項目 | 規則 |
+| --- | --- |
+| 測り方 | 比較対象の全モデルを**同一プロセス内で連続して**測る（1回の実行＝1測定セッション） |
+| 1回の推論 | 2.0秒窓（32000標本）1つ: 対数メル計算 → 固定値の正規化 → テンソル化と転送 → モデルの前向き計算 |
+| 同期 | 各回の計時の直前と直後に `torch.mps.synchronize()`（cpu は何もしない） |
+| 入力 | 標準正規 × 0.05 の窓（種 20260921）。全モデルで同じ窓 |
+| ウォームアップ | 各モデル20回（`--warmup`、既定 `DEFAULT_WARMUP`）。測定と同じ交互の順で行う |
+| 測定回数 | 各モデル100回（`--repeats`、既定 `DEFAULT_REPEATS`） |
+| 記録する統計量 | **中央値と最大値**（詳細 JSON には各回の値・平均・最小も残す） |
+| 測定順 | **交互測定**。周ごとに全モデルを1回ずつ、開始するモデルを1つずつずらす（周 r にモデル i を (i + r) mod n 番目に測る） |
+| 識別子 | `latency_session_id` = `lat-<ローカル時刻 YYYYmmddTHHMMSS>-<8桁の16進乱数>`。同じセッションの行は同じ値 |
+| 比較 | 同じ `latency_session_id` の行の新方式の値だけを並べる。異なるセッションはエラー |
+
+- 1回の推論に含めるもの: 対数メル計算（CPU）、正規化、テンソル化と mps への転送、前向き計算、計時直後の同期までの時間。含めないもの: 音声の読み込み・再標本化。範囲は旧方式（`scripts/eval_dev_full.py` の `measure_latency` の `total_ms`）とそろえた
+- 計時直前の同期で前回までの非同期の計算が残っていないことを保証し、計時直後の同期で今回の計算の完了までを含める
+- 交互測定では直前に別のモデルが動くので、測った値は「複数モデルが交互に走る条件での値」である。比較（相対値）を優先した。モデルごとに連続して測る方式は比較用の `--no-interleave` として残す
+- results/metrics.csv の列: 既存の列の後ろに `latency_session_id`（測定セッションの識別子。精度評価の行と既存行は空欄）、`latency_ms_median`（新方式の中央値、ミリ秒）、`latency_ms_max`（新方式の最大値、ミリ秒）を置く
+  - 既存列 `latency_ms_per_inference` は旧方式の平均として残す。精度評価の入口は引き続きこの列に書く。行ごとに別プロセス・別時刻で測った値なので、モデル間の比較には使わない
+  - 新方式の行は `split` を `latency_2s_window` とする。精度の指標列と `latency_ms_per_inference` は空欄。`model_size_bytes`・コミット・設定ファイルのパスは埋める
+  - 比較の読み出しは `spkrate.eval.latency.compare_latency(csv, [実験ID...])` で行う。指定した全実験を含むセッションのうち最新のものを使い、そのようなセッションが無い場合はエラー（`LatencySessionMismatchError`）にする
+- 精度評価（`scripts/eval_dev_full.py`: dev・dev_noisy）と推論時間の測定（`scripts/measure_latency.py`）は別の入口とする。精度評価の行に入る旧方式の時間は参考値である
+- **比較に使う推論時間は、比較対象の全モデルを1回の `measure_latency.py` で測った、`latency_session_id` 付きの新方式の値（中央値・最大値）に限る。** 比較対象のモデルが増えたら、既存のモデルも含めて全部を1つのセッションで測り直す（過去のセッションの値と並べない）
 
 ## 学習データ
 
