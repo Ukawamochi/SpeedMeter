@@ -1,0 +1,15 @@
+# 無発話クリップの判定規則 no_speech_suspect（docs/directives/2026-09-25.md 追加指示（2026-09-26）の1）。
+# 実装: src/spkrate/eval/no_speech.py（Rule）、指標の計算 scripts/detect_no_speech.py、
+# 適用 scripts/analyze_no_speech.py apply。根拠と候補の比較は results/no_speech_detection.md
+#
+# すべての条件を満たす（論理積）クリップを no_speech_suspect とする。閾値は、聴取で発話が
+# 聞き取れないと確定した37件（results/error_cases/to_listen.tsv）をすべて含む値を、37件を含む向きに
+# 刻み（dB は0.1、cer は0.01）で丸めたもの。dev だけで決めた（test.json は使わない）
+# - frame_db_p90: 20ms フレームの実効値（dBFS）の90%点。37件の最大は #12 の -25.6
+# - frame_db_range: 同じく95%点 − 10%点（dB）。37件の最大は #35 の 33.3
+# - cer: ひらがなCTCの貪欲デコードと正解のかなとの文字誤り率。37件の最小は #21 の 0.405
+rule:
+  conditions:
+    - {metric: frame_db_p90, op: "<=", threshold: -25.5}
+    - {metric: frame_db_range, op: "<=", threshold: 33.3}
+    - {metric: cer, op: ">=", threshold: 0.4}
