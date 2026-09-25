@@ -7,7 +7,7 @@
 | 記号 | 対象 | 出力 |
 | --- | --- | --- |
 | D1 分割整合性 | dev の4.0秒以上（13,322件）から無作為1,000件 | ``mean(|Σ − P|) / (2.0m)``（mora/s） |
-| D2 無音・雑音窓 | デジタル無音の2.0秒窓500本、MUSAN noise の2.0秒窓500本 | 予測モーラ数の平均（mora） |
+| D2 無音・雑音窓 | デジタル無音の2.0秒窓500本、MUSAN noise（分割の評価用）の2.0秒窓500本 | 予測モーラ数の平均（mora） |
 | D3 連結加法性 | dev から2件ずつ500組（間に0.2秒の無音） | ``mean(|差|) / 連結後の長さ``（mora/s） |
 
 方式Bへ移る条件の閾値（B1: D1>0.25 mora/s、B2: D2>1.0 モーラ、B5: D3>0.25 mora/s かつ
@@ -15,9 +15,12 @@ D1>0.25）に照らして**超過の有無だけ**を記録する。採否の判
 
 `configs/splits/test.json` は使わない。`data/` は読むだけで変更しない。
 
+D2 の雑音は ``--musan-noise-split``（通常 configs/splits/musan_noise.json）の評価用（eval）だけを
+使う。指定が無ければモデルを読み込む前に止まる。2026-09-25 より前の D2 の値は全930ファイルでの値。
+
 実行（背景で実行しログをファイルへ）:
     PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python scripts/window_diagnostics.py \\
-        > /tmp/window_diagnostics.log 2>&1
+        --musan-noise-split configs/splits/musan_noise.json > /tmp/window_diagnostics.log 2>&1
 """
 
 from __future__ import annotations
@@ -32,13 +35,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from spkrate.data.augment import MusanNoiseSource
 from spkrate.eval.audio import load_audio
 from spkrate.eval.window_diag import (
     GAP_SEC,
     SAMPLE_RATE,
     WINDOW_SEC,
     concat_additivity,
+    make_d2_noise_source,
     make_predictor,
     split_consistency,
     summarize,
@@ -95,7 +98,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--experiment-id", default=EXPERIMENT_ID)
     parser.add_argument("--output-json", default=OUTPUT_JSON)
     parser.add_argument("--output-md", default=OUTPUT_MD)
+    parser.add_argument("--musan-noise-split", default=None,
+                        help="MUSAN noise の分割ファイル（D2 は評価用だけを使う）。必須")
     args = parser.parse_args(argv)
+    # 分割の指定が無ければ、モデルの読み込みより前に止める
+    noise_source = make_d2_noise_source(args.musan_noise_split, MUSAN_ROOT)
 
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -166,8 +173,8 @@ def main(argv: list[str] | None = None) -> int:
         window_samples = int(round(WINDOW_SEC * SAMPLE_RATE))
         silence = [np.zeros(window_samples, dtype=np.float32) for _ in range(args.d2_windows)]
         silence_pred = predict(silence)
-        noise_source = MusanNoiseSource(MUSAN_ROOT)
-        log(f"D2: MUSAN noise のファイル数 {len(noise_source.paths)}")
+        log(f"D2: MUSAN noise の評価用のファイル数 {len(noise_source.paths)}"
+            f"（{args.musan_noise_split}）")
         noise_rng = np.random.default_rng(args.seed + 1)
         noise = [np.asarray(noise_source.sample(window_samples, noise_rng), dtype=np.float32)
                  for _ in range(args.d2_windows)]
@@ -187,6 +194,9 @@ def main(argv: list[str] | None = None) -> int:
         scaled_pred = predict(scaled)
         d2_value = max(float(np.mean(silence_pred)), float(np.mean(noise_pred)))
         summary["D2"] = {
+            "musan_noise_split": args.musan_noise_split,
+            "musan_noise_part": "eval",
+            "musan_noise_files": len(noise_source.paths),
             "silence_mora": summarize(silence_pred.tolist()),
             "musan_noise_mora": summarize(noise_pred.tolist()),
             "musan_noise_rms": summarize(noise_rms),

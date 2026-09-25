@@ -65,7 +65,16 @@ def _write_musan(root: Path, *, num_files: int = 3, amplitude: float = 0.1) -> P
     for index in range(num_files):
         samples = (amplitude * rng.standard_normal(16000)).astype(np.float32)
         sf.write(noise_dir / f"noise-{index:04d}.wav", samples, 16000)
+    _write_split(root / "musan_noise.json", num_files)
     return root
+
+
+def _write_split(path: Path, num_files: int = 3) -> Path:
+    """模擬 MUSAN（``noise/free-sound/noise-XXXX.wav``）の分割ファイル。最後の1件を評価用にする。"""
+    names = [f"noise/free-sound/noise-{index:04d}.wav" for index in range(num_files)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"train": names[:-1], "eval": names[-1:]}), encoding="utf-8")
+    return path
 
 
 def _noise_source(amplitude: float = 0.1) -> ArrayNoiseSource:
@@ -296,7 +305,8 @@ def _features_config(tmp_path: Path, silence: dict | None) -> TrainConfig:
 def test_features_path_adds_silence_to_train_only(tmp_path: Path) -> None:
     musan = _write_musan(tmp_path / "musan")
     config = _features_config(
-        tmp_path, {"enabled": True, "ratio": 0.3, "musan_root": str(musan)}
+        tmp_path, {"enabled": True, "ratio": 0.3, "musan_root": str(musan),
+             "musan_noise_split": str(musan / "musan_noise.json")}
     )
     train, dev, _ = build_datasets(config)
     assert isinstance(train, TrainWithSilence)
@@ -328,7 +338,8 @@ def test_enabled_without_augment_is_independent(tmp_path: Path) -> None:
     """拡張なし（features 経路）でも有効化でき、学習が完走して log.txt に件数が出る。"""
     musan = _write_musan(tmp_path / "musan")
     config = _features_config(
-        tmp_path, {"enabled": True, "ratio": 0.3, "musan_root": str(musan)}
+        tmp_path, {"enabled": True, "ratio": 0.3, "musan_root": str(musan),
+             "musan_noise_split": str(musan / "musan_noise.json")}
     )
     outcome = run_training(config)
     log_text = (outcome.run_dir / "log.txt").read_text(encoding="utf-8")
@@ -357,9 +368,13 @@ def test_missing_musan_stops_before_data_loading(tmp_path: Path) -> None:
 
 def test_musan_without_wav_stops(tmp_path: Path) -> None:
     (tmp_path / "musan" / "noise").mkdir(parents=True)
+    split = _write_split(tmp_path / "musan_noise.json")
     with pytest.raises(SilenceSetupError, match="wav"):
         check_silence_setup(
-            SilenceSettings.from_mapping({"enabled": True, "musan_root": str(tmp_path / "musan")})
+            SilenceSettings.from_mapping(
+                {"enabled": True, "musan_root": str(tmp_path / "musan"),
+                 "musan_noise_split": str(split)}
+            )
         )
 
 

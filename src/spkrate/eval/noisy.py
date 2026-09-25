@@ -1,7 +1,8 @@
 """雑音下評価セット dev_noisy の生成（設定は ``configs/eval/dev_noisy.yaml``）。
 
 dev（``configs/splits/dev.json``）の各クリップに、固定のインパルス応答による残響と
-MUSAN noise を SNR 5 / 10 / 15 dB で掛けたものを dev_noisy とする。構成の詳細は
+MUSAN noise（``configs/splits/musan_noise.json`` の評価用だけ）を SNR 5 / 10 / 15 dB で掛けたものを
+dev_noisy とする。構成の詳細は
 設定ファイルの冒頭のコメントに書いた。要点は次のとおり。
 
 - dev 全件 × 3条件（SNR ごとに dev 全件）。正解のモーラ数と区間長は dev と同じ
@@ -54,6 +55,7 @@ from spkrate.data.augment import (
     apply_reverb,
 )
 from spkrate.data.common_voice import ClipRecord
+from spkrate.data.musan_split import require_split_path
 from spkrate.features.melspec import MEL_DEFAULTS, LogMelSpectrogram
 from spkrate.train.data import ClipItem
 
@@ -109,6 +111,9 @@ class NoisyDevConfig:
     reverb: ReverbSpec
     musan_root: str = "data/musan"
     musan_subsets: tuple[str, ...] = ("noise",)
+    # MUSAN noise の学習用・評価用の分割ファイル。dev_noisy は評価用（eval）だけを使う。
+    # 設定ファイルから読むとき（from_mapping）は必須で、無ければ評価の開始前に止める。
+    musan_noise_split: str | None = None
 
     def __post_init__(self) -> None:
         if not self.snr_db:
@@ -119,6 +124,7 @@ class NoisyDevConfig:
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "NoisyDevConfig":
         reverb = mapping["reverb"]
+        split = require_split_path(mapping.get("musan_noise_split"), setting="musan_noise_split")
         return cls(
             seed=int(mapping["seed"]),
             snr_db=tuple(float(value) for value in mapping["snr_db"]),
@@ -131,6 +137,7 @@ class NoisyDevConfig:
             ),
             musan_root=str(mapping.get("musan_root", "data/musan")),
             musan_subsets=tuple(str(s) for s in mapping.get("musan_subsets", ("noise",))),
+            musan_noise_split=str(split),
         )
 
 
@@ -150,11 +157,21 @@ def snr_label(snr_db: float) -> str:
 def make_noise_source(
     config: NoisyDevConfig, repo_root: str | Path | None = None
 ) -> MusanNoiseSource:
-    """設定の MUSAN を読む雑音源（読み取りのみ）。相対パスは ``repo_root`` から解決する。"""
-    root = Path(config.musan_root)
-    if not root.is_absolute() and repo_root is not None:
-        root = Path(repo_root) / root
-    return MusanNoiseSource(root, subsets=config.musan_subsets)
+    """設定の MUSAN の評価用（分割の eval）だけを読む雑音源（読み取りのみ）。
+
+    相対パスは ``repo_root`` から解決する。分割の指定が無ければ ``MusanSplitError``。
+    """
+
+    def resolve(value: str | Path) -> Path:
+        path = Path(value)
+        if not path.is_absolute() and repo_root is not None:
+            path = Path(repo_root) / path
+        return path
+
+    split = require_split_path(config.musan_noise_split, setting="musan_noise_split")
+    return MusanNoiseSource.from_split(
+        resolve(config.musan_root), resolve(split), "eval", subsets=config.musan_subsets
+    )
 
 
 @lru_cache(maxsize=8)

@@ -293,6 +293,10 @@ class MusanNoiseSource:
 
     ファイル一覧は最初の使用時に作る。波形はファイル単位でメモリに保持し
     （既定で最大64ファイル）、同じファイルを何度も復号しないようにする。
+
+    ``files`` を与えると、``subsets`` 以下の全 wav ではなく、そのファイル（``root`` からの
+    相対パス）だけを使う。学習用・評価用の分割（``configs/splits/musan_noise.json``）の
+    片側だけを読むには ``MusanNoiseSource.from_split`` を使う（``spkrate.data.musan_split``）。
     """
 
     #: 使ってよいサブセット。``speech`` は上の理由で含めない。
@@ -306,6 +310,7 @@ class MusanNoiseSource:
         subsets: Sequence[str] = DEFAULT_SUBSETS,
         sample_rate: int = SAMPLE_RATE,
         cache_size: int = 64,
+        files: Sequence[str] | None = None,
     ) -> None:
         self.root = Path(root)
         self.sample_rate = int(sample_rate)
@@ -326,10 +331,53 @@ class MusanNoiseSource:
         self.subsets = requested
         self._paths: list[Path] | None = None
         self._cache: dict[Path, np.ndarray] = {}
+        self.files: tuple[str, ...] | None = None
+        self.split_part: str | None = None
+        if files is not None:
+            selected = tuple(sorted(str(name) for name in files))
+            if not selected:
+                raise ValueError("files が空")
+            outside = [name for name in selected if Path(name).parts[:1] not in
+                       [(subset,) for subset in self.subsets]]
+            if outside:
+                raise ValueError(
+                    f"files に subsets（{self.subsets}）の外のファイルがある: {outside[:3]}"
+                )
+            self.files = selected
+
+    @classmethod
+    def from_split(
+        cls,
+        root: str | Path,
+        split_path: str | Path | None,
+        part: str,
+        *,
+        setting: str = "musan_noise_split",
+        **kwargs: Any,
+    ) -> "MusanNoiseSource":
+        """分割ファイルの片側（``"train"`` か ``"eval"``）だけを読む雑音源を作る。
+
+        ``split_path`` が無ければ ``MusanSplitError``（``setting`` は誤りの文言に使う設定名）。
+        """
+        from spkrate.data.musan_split import load_musan_noise_split, require_split_path
+
+        path = require_split_path(split_path, setting=setting)
+        source = cls(root, files=load_musan_noise_split(path, part), **kwargs)
+        source.split_part = part
+        return source
 
     @property
     def paths(self) -> list[Path]:
         """対象の wav ファイル一覧（並びは固定）。"""
+        if self._paths is None and self.files is not None:
+            paths = [self.root / name for name in self.files]
+            missing = [str(path) for path in paths if not path.is_file()]
+            if missing:
+                raise FileNotFoundError(
+                    f"分割ファイルに書かれた MUSAN の wav が無い（{len(missing)}件。例 {missing[0]}）。"
+                    "配置先は data/DATASETS.md を参照する"
+                )
+            self._paths = paths
         if self._paths is None:
             paths: list[Path] = []
             for subset in self.subsets:

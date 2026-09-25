@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import json
+
 import dataclasses
 import logging
 import sys
@@ -41,8 +43,20 @@ def _write_musan(root: Path, *, num_files: int = 3) -> Path:
     return root
 
 
+def _write_split(path: Path, num_files: int = 3) -> Path:
+    """模擬 MUSAN（``noise/free-sound/noise-XXXX.wav``）の分割ファイル。最後の1件を評価用にする。"""
+    names = [f"noise/free-sound/noise-{index:04d}.wav" for index in range(num_files)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"train": names[:-1], "eval": names[-1:]}), encoding="utf-8")
+    return path
+
+
 def _config(tmp_path: Path, *, augment: dict[str, Any] | None = None, **data: Any) -> TrainConfig:
-    augment_section: dict[str, Any] = {"enabled": True, "musan_root": str(tmp_path / "musan")}
+    augment_section: dict[str, Any] = {
+        "enabled": True,
+        "musan_root": str(tmp_path / "musan"),
+        "musan_noise_split": str(_write_split(tmp_path / "musan_noise.json")),
+    }
     augment_section.update(augment or {})
     return TrainConfig.from_mapping(
         {
@@ -163,7 +177,7 @@ def test_valid_config_lists_augmentations(tmp_path: Path, musan: Path) -> None:
     for name in ("時間伸縮", "残響", "雑音重畳", "帯域制限", "音量変化", "周波数マスク"):
         assert f"拡張: {name} 確率=" in joined
     assert str(musan / "noise") in joined
-    assert "3ファイル" in joined
+    assert "の train、2ファイル" in joined  # 学習用だけ（3件中2件）
 
 
 def _read_log(config: TrainConfig) -> list[str]:
@@ -183,7 +197,7 @@ def test_training_log_lists_augmentations_before_loop(tmp_path: Path, musan: Pat
     first_epoch = next(i for i, line in enumerate(lines) if "エポック1" in line)
     model_line = next(i for i, line in enumerate(lines) if "モデル:" in line)
     assert noise_line < model_line < first_epoch
-    assert "3ファイル" in lines[noise_line]
+    assert "の train、2ファイル" in lines[noise_line]
 
 
 def test_training_log_says_no_augment_when_disabled(tmp_path: Path) -> None:
@@ -241,7 +255,11 @@ def test_disabled_augment_with_settings_warns_but_continues(
 def test_disabled_augment_without_settings_does_not_warn(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    config = _config(tmp_path, augment={"enabled": False, "musan_root": None}, source="features")
+    config = _config(
+        tmp_path,
+        augment={"enabled": False, "musan_root": None, "musan_noise_split": None},
+        source="features",
+    )
     with caplog.at_level("WARNING", logger=_TEST_LOGGER):
         assert check_augment_setup(config, logging.getLogger(_TEST_LOGGER)) == ["拡張=なし"]
     assert not [r for r in caplog.records if r.levelname == "WARNING"]

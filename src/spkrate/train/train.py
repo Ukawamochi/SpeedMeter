@@ -305,12 +305,15 @@ class AugmentSettings:
 
     ``enabled`` が False のときは拡張を一切掛けない。``params`` は
     ``spkrate.data.augment.AugmentConfig`` の項目をそのまま受ける。
-    ``musan_root`` を与えると雑音重畳に MUSAN の noise サブセットを使う。
+    ``musan_root`` を与えると雑音重畳に MUSAN の noise サブセットを使う。使うのは
+    ``musan_noise_split``（通常 ``configs/splits/musan_noise.json``）の学習用（train）だけで、
+    雑音重畳が有効なのに分割の指定が無ければ学習開始前に止める（docs/spec.md「学習データ」）。
     """
 
     enabled: bool = False
     params: dict[str, Any] = field(default_factory=dict)
     musan_root: str | None = None
+    musan_noise_split: str | None = None
 
     @classmethod
     def from_mapping(cls, mapping: dict[str, Any] | None) -> "AugmentSettings":
@@ -900,6 +903,8 @@ def check_augment_setup(
             ignored.append(f"augment.params（{', '.join(sorted(config.augment.params))}）")
         if config.augment.musan_root:
             ignored.append(f"augment.musan_root={config.augment.musan_root}")
+        if config.augment.musan_noise_split:
+            ignored.append(f"augment.musan_noise_split={config.augment.musan_noise_split}")
         if ignored:
             log.warning(
                 "augment.enabled=false のため、書かれている %s は使われない（学習は続ける）",
@@ -920,7 +925,9 @@ def check_augment_setup(
     validate_augment_config(augment_config)
     noise_description = "（使わない）"
     if augment_config.noise_enabled:
-        noise_description = _check_musan(config.augment.musan_root)
+        noise_description = _check_musan(
+            config.augment.musan_root, config.augment.musan_noise_split
+        )
     lines = describe_augment_config(augment_config, noise_description=noise_description)
     # 設計上の確率と実際の適用率の両方を残す（docs/questions.md 2026-09-24 回答4）。
     # ここまで来れば、雑音重畳が有効なら雑音源はある。
@@ -928,7 +935,7 @@ def check_augment_setup(
     return lines + describe_application_rates(rates)
 
 
-def _check_musan(musan_root: str | None) -> str:
+def _check_musan(musan_root: str | None, musan_noise_split: str | None = None) -> str:
     """雑音重畳が有効なときの雑音源の検査。ログに書く雑音源の説明を返す。"""
     if not musan_root:
         raise AugmentSetupError(
@@ -942,8 +949,14 @@ def _check_musan(musan_root: str | None) -> str:
             "配置先は data/DATASETS.md を参照する"
         )
     from spkrate.data.augment import MusanNoiseSource
+    from spkrate.data.musan_split import MusanSplitError
 
-    noise = MusanNoiseSource(musan_root)
+    try:
+        noise = MusanNoiseSource.from_split(
+            musan_root, musan_noise_split, "train", setting="augment.musan_noise_split"
+        )
+    except MusanSplitError as error:
+        raise AugmentSetupError(str(error)) from error
     try:
         noise_paths = noise.paths
     except FileNotFoundError as error:
@@ -952,11 +965,11 @@ def _check_musan(musan_root: str | None) -> str:
             f"行われない（{error}）"
         ) from error
     subsets = "、".join(str(Path(musan_root) / subset) for subset in noise.subsets)
-    return f"{subsets}（{len(noise_paths)}ファイル）"
+    return f"{subsets} の学習用（{musan_noise_split} の train、{len(noise_paths)}ファイル）"
 
 
 def _build_noise_source(config: TrainConfig, logger: logging.Logger) -> Any:
-    """MUSAN の noise サブセットを雑音源として用意する（設定にあれば）。"""
+    """MUSAN の noise サブセットの学習用（分割の train）を雑音源として用意する（設定にあれば）。"""
     if not config.augment.enabled or not config.augment.musan_root:
         return None
     augment_config = config.augment.build()
@@ -964,8 +977,17 @@ def _build_noise_source(config: TrainConfig, logger: logging.Logger) -> Any:
         return None
     from spkrate.data.augment import MusanNoiseSource
 
-    source = MusanNoiseSource(config.augment.musan_root)
-    logger.info("雑音源: MUSAN noise %d ファイル", len(source.paths))
+    source = MusanNoiseSource.from_split(
+        config.augment.musan_root,
+        config.augment.musan_noise_split,
+        "train",
+        setting="augment.musan_noise_split",
+    )
+    logger.info(
+        "雑音源: MUSAN noise の学習用 %d ファイル（%s）",
+        len(source.paths),
+        config.augment.musan_noise_split,
+    )
     return source
 
 

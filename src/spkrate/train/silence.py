@@ -77,6 +77,7 @@ import numpy as np
 from torch.utils.data import Dataset
 
 from spkrate.data.augment import SAMPLE_RATE, MusanNoiseSource, NoiseSource
+from spkrate.data.musan_split import MusanSplitError
 from spkrate.features.melspec import MEL_DEFAULTS, LogMelSpectrogram, num_frames
 
 __all__ = [
@@ -148,6 +149,9 @@ class SilenceSettings:
         ratio: 学習データのクリップ数に対する追加件数の割合（0より大きく1以下）。
         mix: 3種の内訳の重み。書いた場合は既定を置き換える（書かなかった種類は0）。
         musan_root: MUSAN の配置先。``musan_noise`` か ``quiet_noise`` の重みが正なら必要。
+        musan_noise_split: MUSAN noise の学習用・評価用の分割ファイル（通常
+            ``configs/splits/musan_noise.json``）。学習用（train）だけを使う。``musan_noise`` か
+            ``quiet_noise`` の重みが正なら必要で、無ければ学習開始前に止める。
         quiet_noise_dbfs_range: ``quiet_noise`` の実効値の範囲（dBFS）。
         duration_range_sec: 長さの範囲（秒、一様）。``None`` なら学習クリップの長さの
             分布から復元抽出する。
@@ -157,6 +161,7 @@ class SilenceSettings:
     ratio: float = 0.03
     mix: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_MIX))
     musan_root: str = "data/musan"
+    musan_noise_split: str | None = None
     quiet_noise_dbfs_range: tuple[float, float] = (-90.0, -60.0)
     duration_range_sec: tuple[float, float] | None = None
 
@@ -403,7 +408,7 @@ def build_silence_dataset(
     """設定と学習データから無音サンプルのデータセットを作る。
 
     ``noise_source`` を省略し、雑音の種類が必要なら ``settings.musan_root`` の
-    MUSAN noise を使う。
+    MUSAN noise のうち ``settings.musan_noise_split`` の学習用（train）だけを使う。
     """
     settings.validate()
     counts = allocate_counts(len(base), settings.ratio, settings.mix)  # type: ignore[arg-type]
@@ -417,7 +422,12 @@ def build_silence_dataset(
         durations = rng.uniform(low, high, size=len(kinds)).tolist()
     needs_noise = counts["musan_noise"] + counts["quiet_noise"] > 0
     if needs_noise and noise_source is None:
-        noise_source = MusanNoiseSource(settings.musan_root)
+        noise_source = MusanNoiseSource.from_split(
+            settings.musan_root,
+            settings.musan_noise_split,
+            "train",
+            setting="silence_samples.musan_noise_split",
+        )
     return SilenceDataset(
         kinds,
         durations,
@@ -455,12 +465,23 @@ def check_silence_setup(settings: SilenceSettings) -> list[str]:
                 " musan_noise と quiet_noise を0にする）"
             )
         try:
-            paths = MusanNoiseSource(root).paths
+            source = MusanNoiseSource.from_split(
+                root,
+                settings.musan_noise_split,
+                "train",
+                setting="silence_samples.musan_noise_split",
+            )
+        except MusanSplitError as error:
+            raise SilenceSetupError(str(error)) from error
+        try:
+            paths = source.paths
         except FileNotFoundError as error:
             raise SilenceSetupError(
                 f"silence_samples.musan_root={settings.musan_root} に MUSAN noise の wav が無い（{error}）"
             ) from error
-        musan_text = f"{root / 'noise'}（{len(paths)}ファイル）"
+        musan_text = (
+            f"{root / 'noise'} の学習用（{settings.musan_noise_split} の train、{len(paths)}ファイル）"
+        )
     low, high = settings.quiet_noise_dbfs_range
     duration_text = (
         "学習クリップの長さ分布から復元抽出"

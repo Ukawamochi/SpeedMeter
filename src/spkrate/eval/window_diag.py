@@ -35,6 +35,7 @@ __all__ = [
     "SplitResult",
     "concat_additivity",
     "concatenate_with_silence",
+    "make_d2_noise_source",
     "make_predictor",
     "split_consistency",
     "split_into_windows",
@@ -54,6 +55,20 @@ PredictFn = Callable[[Sequence[np.ndarray]], np.ndarray]
 
 # --------------------------------------------------------------------------------------
 # 波形の切り出しと連結（実データに依存しない純粋な操作）
+
+
+def make_d2_noise_source(
+    musan_noise_split: str | None, musan_root: str = "data/musan"
+) -> Any:
+    """D2 の雑音窓の雑音源。MUSAN noise の評価用（分割の eval）だけを使う。
+
+    分割ファイルの指定が無ければ ``MusanSplitError`` で止める（モデルの読み込みより前に呼ぶ）。
+    """
+    from spkrate.data.augment import MusanNoiseSource
+
+    return MusanNoiseSource.from_split(
+        musan_root, musan_noise_split, "eval", setting="--musan-noise-split"
+    )
 
 
 def split_into_windows(
