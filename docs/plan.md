@@ -410,6 +410,8 @@ results/error_cases/ の音声のうち、6-2で「テキストからは原因�
 
 # 第7段階　条件の探索
 
+方式Bの実験はdocs/directives/2026-09-26.mdに従って7-1より先に行う
+
 ## 7-1　探索の計画（判断サブエージェント）
 
 docs/experiments/003-first-model.md と誤り分析を読み、探索する条件を決めて docs/experiments/004-search-plan.md に一覧で書く。各条件について、何を確かめるための実験かを明記する。
