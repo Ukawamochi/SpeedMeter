@@ -214,3 +214,8 @@
 - data/musan/noise の930ファイルを区分ごとに8対2で分け configs/splits/musan_noise.json に固定した（種 20260925。学習用 free-sound 674・sound-bible 70、評価用 169・17）。生成は scripts/build_musan_noise_split.py。
 - 雑音重畳・無音サンプルは学習用、dev_noisy・D2 は評価用だけを読む。分割の指定が無ければ開始前に停止する。dev_noisy.yaml に musan_noise_split を追加し、spec.md に反映した。pytest 566件通過。
 - configs/exp00*.yaml は書き換えていないため、過去の設定のまま学習・再開すると停止する。exp004 の dev_noisy は再評価していない。
+
+### 2026-09-25 判断: 指示書タスク3（強制アライメント手段の選定）
+- 採用: ひらがなCTC（vumichien/wav2vec2-large-xlsr-japanese-hiragana、Apache-2.0、rev 017225b）＋ torchaudio.functional.forced_align。次点 MMS_FA（CC-BY-NC、ローマ字変換で dev 63件が変換不能）。Julius・MFA は uv で導入できず除外。transformers 5.17.0 を依存に追加。
+- dev 20件（話速帯ごと5件）で両候補とも20/20成功、モーラ数はラベルと全件一致。1件約0.107秒（読み込み込み）、dev 29,518件で約53分。候補間の境界差は中央値20ms。
+- 不一致・失敗は除外して理由別に記録する。出力はピーク状（9割が1フレーム）で、窓の計数はモーラ中点で行うことを推奨。詳細は docs/decisions/008-forced-alignment.md。
