@@ -291,3 +291,6 @@
 ### 2026-09-27 測定: 指示書 2026-09-26-rtx3060 タスク4-2（exp006 の起動）
 - configs/exp006.yaml（exp/011-method-a-control の f70044e。exp005 との違いは方式A・全件の dev 検証・bucketing・device=cuda）を作り、ubuntu-desktop の tmux で 2026-09-27 00:16 に起動した。
 - エポック1: 検証 MAE 0.9510、685秒（データ待ちの比率 0.351）。CUDA allocator の OOM 警告が3回出たが、例外にはならず学習は続いている。RAM の available は最小約6GiB。
+
+### 2026-09-27 統括: exp006 の中断（ubuntu-desktop の移設）
+- 人間の指示で一時中断した。ubuntu-desktop を隣の部屋に移すため、exp006 をエポック3の途中（00:40）で Ctrl-C で止めた。checkpoint_last.pt はエポック2の終わり（検証 MAE 0.7863）で、移設の後に resume_from で再開する。exp005（Mac）は続けている。
