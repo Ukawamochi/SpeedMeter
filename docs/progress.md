@@ -282,3 +282,8 @@
 - scripts/sync_to_remote.sh・fetch_from_remote.sh を作り main にマージした（86a8929）。.git・作業ツリー・data（common_voice_ja・musan・processed）を送り、ファイル数とバイト数は3件とも一致した。
 - 遠隔機で uv sync --frozen 成功（torch 2.14.0+cu130、RTX 3060 を認識、TF32 無効）。pytest 730 passed / 3 skipped（mps 2件・CTC 重み未取得1件。cuda の試験は通った）。
 - 完走確認2件は cuda で完走した。1エポックは Mac の約24秒に対し約2秒。データ待ちの比率は 0.53〜0.67（num_workers 4 で 0.36〜0.58）。メモリの used は最大約5.2GiB。結果は 010 の4節、出力は runs/*_cuda* に戻した。
+
+### 2026-09-27 実装: 指示書 2026-09-26-rtx3060 タスク4-1（文書の更新）
+- CLAUDE.md の実行環境を2台（mac=mps、ubuntu-desktop=cuda）、精度の条件（float64・torch.compile・混合精度なし、cuda は TF32 無効）、正本と git の操作は Mac だけ（遠隔機は sync_to_remote.sh の checkout だけ例外）、推論時間は Mac、並列の方針に書き改めた。
+- README.md の現在の実装を main の src/ に合わせて書き直し、開発環境に2台の構成・ubuntu-desktop の環境構築・sync/fetch スクリプトの使い方を書いた（呼び名だけを使い、ホスト名・IP は書かない）。
+- docs/compute.md を新設（exp005 mac 実行中 2026-09-26 14:34 開始、cuda の完走確認2件）。data/DATASETS.md に遠隔機の配置と --data での送り方を追記した。exp/010-method-b に文書だけをコミットした。
