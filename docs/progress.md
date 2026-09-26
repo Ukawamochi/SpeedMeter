@@ -287,3 +287,7 @@
 - CLAUDE.md の実行環境を2台（mac=mps、ubuntu-desktop=cuda）、精度の条件（float64・torch.compile・混合精度なし、cuda は TF32 無効）、正本と git の操作は Mac だけ（遠隔機は sync_to_remote.sh の checkout だけ例外）、推論時間は Mac、並列の方針に書き改めた。
 - README.md の現在の実装を main の src/ に合わせて書き直し、開発環境に2台の構成・ubuntu-desktop の環境構築・sync/fetch スクリプトの使い方を書いた（呼び名だけを使い、ホスト名・IP は書かない）。
 - docs/compute.md を新設（exp005 mac 実行中 2026-09-26 14:34 開始、cuda の完走確認2件）。data/DATASETS.md に遠隔機の配置と --data での送り方を追記した。exp/010-method-b に文書だけをコミットした。
+
+### 2026-09-27 測定: 指示書 2026-09-26-rtx3060 タスク4-2（exp006 の起動）
+- configs/exp006.yaml（exp/011-method-a-control の f70044e。exp005 との違いは方式A・全件の dev 検証・bucketing・device=cuda）を作り、ubuntu-desktop の tmux で 2026-09-27 00:16 に起動した。
+- エポック1: 検証 MAE 0.9510、685秒（データ待ちの比率 0.351）。CUDA allocator の OOM 警告が3回出たが、例外にはならず学習は続いている。RAM の available は最小約6GiB。
