@@ -271,3 +271,9 @@
 - ubuntu-desktop に git と tmux が無く、導入に sudo が要る。人間が `sudo apt install git tmux` を行うと決まった。導入が済むまで停止する（questions.md に記録）。exp005 は Mac で学習を続けている。
 - 追記: 人間が ubuntu-desktop に git（2.53.0）と tmux（3.6）を導入したことを ssh で確認し、010-compute-environment.md に反映した。
 - 改訂版タスク1（0aed609）: sudo -n 成功、Secure Boot 有効（ドライバは動作済みで導入不要）。uv 0.12.19 をユーザー権限で、pyopenjtalk のビルド用に build-essential と cmake 4.2.3 を sudo apt で導入し、操作の一覧を 010 の5節に記録した。
+
+### 2026-09-26 実装: 指示書 2026-09-26-rtx3060 タスク2（cuda への対応）
+- worktree（feat/cuda-device）で実装し main にマージした（f7d147e）。spkrate.device で mps・cuda・cpu を指定でき、使えないデバイスは開始前に停止する。cuda では TF32 を無効にし、pin_memory を有効にする。
+- 依存: Linux は cu130 の torch 2.14.0+cu130・torchaudio 2.11.0+cu130。macOS で解決される80件の版は変わらない（uv export で比較）。
+- log.txt と config_snapshot.yaml に、ホスト名・GPU名・torch/CUDA の版を記録する。metrics.csv の末尾に host（呼び名 mac/ubuntu-desktop、Public のため生のホスト名は書かない）と device の列を足した（既存29行は空欄）。
+- pytest（Mac）730 passed / 3 skipped（cuda が要る試験）。exp005 の作業ツリーは変えていない。exp005 の評価の追記は main を取り込んでから行う。
