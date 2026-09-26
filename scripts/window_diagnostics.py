@@ -36,6 +36,7 @@ import numpy as np
 import torch
 
 from spkrate.eval.audio import load_audio
+from spkrate.eval.noisy import degrade_waveform, load_noisy_config, make_noise_source
 from spkrate.eval.window_diag import (
     GAP_SEC,
     SAMPLE_RATE,
@@ -102,9 +103,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="mps・cuda・cpu（既定 mps）。使えない場合は開始前に止める")
     parser.add_argument("--musan-noise-split", default=None,
                         help="MUSAN noise の分割ファイル（D2 は評価用だけを使う）。必須")
+    parser.add_argument("--d1-noisy-config", default=None,
+                        help="D1 を雑音下でも測る（補助）ときの dev_noisy の設定（通常 configs/eval/dev_noisy.yaml）")
     args = parser.parse_args(argv)
     # 分割の指定が無ければ、モデルの読み込みより前に止める
     noise_source = make_d2_noise_source(args.musan_noise_split, MUSAN_ROOT)
+    noisy_config = d1_noise_source = None
+    if args.d1_noisy_config is not None:
+        noisy_config = load_noisy_config(args.d1_noisy_config)
+        d1_noise_source = make_noise_source(noisy_config)
 
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -169,6 +176,44 @@ def main(argv: list[str] | None = None) -> int:
                                > THRESHOLD_B1),
         }
         log(f"D1: mean={summary['D1']['abs_error_mora_per_sec']['mean']:.4f} mora/s")
+
+        # ------------------------------------------------ D1 雑音下（補助）
+        # 2026-09-26 指示書0節の5。同じ1,000件のクリップ全体に dev_noisy と同じ加工
+        # （固定残響 → MUSAN noise の評価用、鍵は clip_id）を掛けてから、clean と同じ手順で測る。
+        # 乱数 rng は消費しない（D2・D3 の標本は --d1-noisy-config の有無で変わらない）。
+        if noisy_config is not None:
+            noisy_block: dict[str, object] = {"noisy_config": args.d1_noisy_config,
+                                              "musan_noise_split": noisy_config.musan_noise_split,
+                                              "conditions": {}}
+            pooled_abs, pooled_signed = [], []
+            for snr_db in noisy_config.snr_db:
+                degraded = [(clip_id, degrade_waveform(w, clip_id, snr_db, config=noisy_config,
+                                                       noise_source=d1_noise_source))
+                            for clip_id, w in d1_waveforms]
+                started = time.perf_counter()
+                results = split_consistency(predict, degraded)
+                abs_err = [r.error_mora_per_sec for r in results]
+                signed = [r.diff / r.covered_sec for r in results]
+                pooled_abs += abs_err
+                pooled_signed += signed
+                noisy_block["conditions"][f"snr{snr_db:g}"] = {
+                    "snr_db": float(snr_db),
+                    "sampled": len(results),
+                    "abs_error_mora_per_sec": summarize(abs_err),
+                    "signed_error_mora_per_sec_mean": float(np.mean(np.asarray(signed, dtype=np.float32))),
+                    "mean_sum_windows_mora": float(np.mean(
+                        np.asarray([r.sum_windows for r in results], dtype=np.float32))),
+                    "mean_whole_mora": float(np.mean(
+                        np.asarray([r.whole for r in results], dtype=np.float32))),
+                }
+                log(f"D1 SNR {snr_db:g}dB: mean={np.mean(np.asarray(abs_err, dtype=np.float32)):.4f} "
+                    f"signed={np.mean(np.asarray(signed, dtype=np.float32)):+.4f} mora/s "
+                    f"({time.perf_counter() - started:.1f} 秒)")
+            noisy_block["pooled"] = {
+                "abs_error_mora_per_sec": summarize(pooled_abs),
+                "signed_error_mora_per_sec_mean": float(np.mean(np.asarray(pooled_signed, dtype=np.float32))),
+            }
+            summary["D1_noisy"] = noisy_block
 
         # ------------------------------------------------------------------ D2
         log("D2: 無音窓と MUSAN noise の窓を推論する")
@@ -269,6 +314,23 @@ def render_markdown(s: dict) -> str:
     b2_noise = "超過" if d2["exceeds_B2_musan_noise"] else "超過しない"
     b5_own = "超過" if d3["exceeds_B5_own_threshold"] else "超過しない"
     b5 = "該当" if (d3["exceeds_B5_own_threshold"] and d1["exceeds_B1"]) else "該当しない"
+    d1_noisy_md = ""
+    if s.get("D1_noisy"):
+        dn = s["D1_noisy"]
+        lines = ["", "### D1 雑音下（補助。2026-09-26 指示書0節の5）", "",
+                 f"同じ標本のクリップ全体に dev_noisy の加工（`{dn['noisy_config']}`、MUSAN noise は "
+                 f"`{dn['musan_noise_split']}` の評価用）を掛けてから同じ手順で測る。B1 の判定の対象ではない。", "",
+                 "| 条件 | 件数 | D1 平均 | 中央値 | 第9十分位 | 最大 | 符号つき平均 | Σ の平均 | P の平均 |",
+                 "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+        for name, c in dn["conditions"].items():
+            a = c["abs_error_mora_per_sec"]
+            lines.append(f"| SNR {c['snr_db']:g}dB | {c['sampled']} | **{a['mean']:.4f}** | {a['median']:.4f} | "
+                         f"{a['p90']:.4f} | {a['max']:.4f} | {c['signed_error_mora_per_sec_mean']:+.4f} | "
+                         f"{c['mean_sum_windows_mora']:.4f} | {c['mean_whole_mora']:.4f} |")
+        a = dn["pooled"]["abs_error_mora_per_sec"]
+        lines.append(f"| 3条件まとめ | {a['count']} | **{a['mean']:.4f}** | {a['median']:.4f} | {a['p90']:.4f} | "
+                     f"{a['max']:.4f} | {dn['pooled']['signed_error_mora_per_sec_mean']:+.4f} | | |")
+        d1_noisy_md = "\n".join(lines) + "\n"
     events = s["mps_cpu_fallback_events"]
     fallback = (
         "無し"
@@ -308,7 +370,7 @@ def render_markdown(s: dict) -> str:
 | 符号つき (Σ − P)/(2.0m) の平均 | {d1['signed_error_mora_per_sec_mean']:+.4f} mora/s |
 
 - 閾値 **B1: D1 > {d1['threshold_B1']} mora/s** に対して **{b1}**（測定値 {d1['abs_error_mora_per_sec']['mean']:.4f} vs 閾値 {d1['threshold_B1']}）
-
+{d1_noisy_md}
 ## D2 無音・雑音窓の出力
 
 デジタル無音の2.0秒窓と MUSAN noise のみの2.0秒窓を推論する。仕様は「無音は0モーラ」。
