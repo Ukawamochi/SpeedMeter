@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 import torch
 
+from spkrate.device import host_label
 from spkrate.eval.latency import (
     DEFAULT_REPEATS,
     DEFAULT_WARMUP,
@@ -196,6 +197,7 @@ def test_session_rows_share_id_and_fill_latency_columns(tmp_path):
         assert float(row["latency_ms_max"]) == pytest.approx(result.max_ms)
         assert row["latency_ms_per_inference"] == ""  # 旧方式の列は空欄
         assert row["mae_moras_per_sec"] == ""
+        assert row["host"] and row["device"] == ""  # host は追記した計算機の呼び名
     sid, values = compare_latency(csv_path, ["exp-a", "exp-b"])
     assert sid == session.session_id
     assert values["exp-a"]["median_ms"] == pytest.approx(session.results["exp-a"].median_ms)
@@ -217,7 +219,7 @@ def test_append_latency_rows_to_upgraded_legacy_csv_keeps_old_rows(tmp_path):
     append_metrics_row(_row("lat-1", "exp-a", 2.0, timestamp="2026-09-24T10:00:00+09:00"), csv_path=csv_path)
 
     new_bytes = csv_path.read_bytes().splitlines(keepends=True)
-    assert new_bytes[1] == old_bytes[1].rstrip(b"\r\n") + b",,," + b"\r\n"
+    assert new_bytes[1] == old_bytes[1].rstrip(b"\r\n") + b",,,,," + b"\r\n"
     with csv_path.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert [rows[0][c] for c in LEGACY_METRICS_CSV_COLUMNS] == old
@@ -291,6 +293,7 @@ def test_script_measures_checkpoints_in_one_session(tmp_path, monkeypatch):
     assert [r["experiment_id"] for r in rows] == ["expA", "expB"]
     assert len({r["latency_session_id"] for r in rows}) == 1
     assert all(r["model_size_bytes"] for r in rows)
+    assert {(r["host"], r["device"]) for r in rows} == {(host_label(), "cpu")}
     import json
 
     detail = json.loads(json_path.read_text(encoding="utf-8"))

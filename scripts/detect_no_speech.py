@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
+from spkrate.device import describe_environment
 from spkrate.eval.metrics import band_of
 from spkrate.eval.no_speech import ctc_metrics, energy_metrics, normalize_reference
 from spkrate.labels.alignment import (
@@ -37,7 +38,7 @@ def main() -> int:
     ap.add_argument("--dev", default="configs/splits/dev.json")
     ap.add_argument("--num", type=int, default=None, help="処理する件数（省略時は dev 全件。試行用）")
     ap.add_argument("--seed", type=int, default=20260926, help="--num 指定時の抽出の種")
-    ap.add_argument("--device", default="mps")
+    ap.add_argument("--device", default="mps", help="mps・cuda・cpu。使えない場合は開始前に止める")
     ap.add_argument("--no-resume", action="store_true")
     ap.add_argument("--log-every", type=int, default=500)
     args = ap.parse_args()
@@ -52,6 +53,7 @@ def main() -> int:
     aligner = HiraganaAligner(args.device)
     aligner.emission(np.zeros(16000 * 2, dtype=np.float32))  # MPS の初回カーネル生成
     log.info("モデル読み込み %.1f 秒（device=%s）", time.perf_counter() - t0, args.device)
+    log.info("%s", describe_environment(aligner.environment))
 
     def measure(record: dict, wav: np.ndarray) -> dict:
         ref = normalize_reference(record["kana"], aligner.vocab)

@@ -127,6 +127,8 @@ def read_index(path: str) -> list[dict[str, str]]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--device", default="mps",
+                        help="mps・cuda・cpu（既定 mps）。使えない場合は開始前に止める")
     args = parser.parse_args(argv)
 
     # ---------------------------------------------------------------- 群の決定
@@ -147,7 +149,9 @@ def main(argv: list[str] | None = None) -> int:
     log(f"比較群: 中央値 {median_err:.4f} mora/s 以下 {pool_size} 件から {len(comparison)} 件")
 
     # ---------------------------------------------------------------- 準備
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    from spkrate.device import setup_device
+
+    device, _ = setup_device(args.device)
     model, payload = load_checkpoint(CHECKPOINT, map_location="cpu")
     model = model.to(device).eval()
     normalizer = load_normalization(NORMALIZATION)

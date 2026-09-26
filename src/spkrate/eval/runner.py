@@ -64,6 +64,21 @@ noisy の行の ``config_path`` は「実験の設定;dev_noisy の設定」の�
 新方式の列は既存の列の後ろ（末尾）に足した。列を足す前の csv（ヘッダが
 ``LEGACY_METRICS_CSV_COLUMNS``）には ``append_metrics_row`` は追記せず ``ValueError`` とする。
 ``upgrade_metrics_csv`` で列を足してから追記する（既存行の値は文字列のまま保ち、新しい列は空欄）。
+
+## 実行した計算機の列（host・device）
+
+計算機を2台（Mac の mps と ubuntu-desktop の cuda）にしたため、末尾に ``host`` と ``device`` を
+足した（``HOST_DEVICE_COLUMNS``。docs/directives/2026-09-26-rtx3060.md タスク2）。
+
+- ``host``: 評価を実行した計算機の呼び名（``spkrate.device.host_label``。Mac は ``mac``、
+  ubuntu-desktop は ``ubuntu-desktop``）。Public リポジトリに載るため生のホスト名は書かない。
+  ``MetricsRow.host`` を省くと、追記した計算機の呼び名になる
+- ``device``: 推論に使ったデバイスの種類（``mps``・``cuda``・``cpu``）。呼び出し側が渡す。
+  分からない場合は空欄
+
+列を足す前の行は、どちらも空欄のままにする（``upgrade_metrics_csv``。既存の列と値は変えない）。
+host・device の列を足す前の csv（ヘッダが ``PRE_HOST_METRICS_CSV_COLUMNS``）にも
+``append_metrics_row`` は追記せず ``ValueError`` とする。
 """
 
 from __future__ import annotations
@@ -81,6 +96,7 @@ from typing import Protocol
 import numpy as np
 
 from spkrate.data.splits import load_split, load_test_split
+from spkrate.device import host_label
 from spkrate.eval.audio import load_audio
 from spkrate.eval.metrics import METRIC_COLUMNS, SpeedRateMetrics, compute_metrics
 
@@ -90,10 +106,12 @@ __all__ = [
     "EvalSegment",
     "EvaluationResult",
     "Estimator",
+    "HOST_DEVICE_COLUMNS",
     "LATENCY_COLUMNS",
     "LEGACY_METRICS_CSV_COLUMNS",
     "METRICS_CSV_COLUMNS",
     "MetricsRow",
+    "PRE_HOST_METRICS_CSV_COLUMNS",
     "append_metrics_row",
     "build_eval_segments",
     "evaluate",
@@ -147,8 +165,20 @@ LEGACY_METRICS_CSV_COLUMNS: tuple[str, ...] = (
     "model_size_bytes",
 )
 
+# 実行した計算機の列（モジュール docstring「実行した計算機の列」）。末尾に足す。
+HOST_DEVICE_COLUMNS: tuple[str, ...] = ("host", "device")
+
+# host・device の列を足す前の列順。``upgrade_metrics_csv`` がこのヘッダの csv も移行する。
+PRE_HOST_METRICS_CSV_COLUMNS: tuple[str, ...] = (*LEGACY_METRICS_CSV_COLUMNS, *LATENCY_COLUMNS)
+
 # metrics.csv の列順（固定）。指標列は METRIC_COLUMNS をそのまま展開する。
-METRICS_CSV_COLUMNS: tuple[str, ...] = (*LEGACY_METRICS_CSV_COLUMNS, *LATENCY_COLUMNS)
+METRICS_CSV_COLUMNS: tuple[str, ...] = (*PRE_HOST_METRICS_CSV_COLUMNS, *HOST_DEVICE_COLUMNS)
+
+# 列を足す前のヘッダ → 足す列（``upgrade_metrics_csv``）。
+_UPGRADES: dict[tuple[str, ...], tuple[str, ...]] = {
+    LEGACY_METRICS_CSV_COLUMNS: (*LATENCY_COLUMNS, *HOST_DEVICE_COLUMNS),
+    PRE_HOST_METRICS_CSV_COLUMNS: HOST_DEVICE_COLUMNS,
+}
 
 
 class Estimator(Protocol):
@@ -218,6 +248,7 @@ class MetricsRow:
 
     ``latency_ms_per_inference`` は旧方式の平均（比較には使わない）。新方式の列
     （``latency_session_id`` など）は精度評価の行では通常 None（空欄）である。
+    ``host`` を省くと追記した計算機の呼び名（``host_label``）、``device`` を省くと空欄になる。
     """
 
     experiment_id: str
@@ -232,6 +263,8 @@ class MetricsRow:
     latency_session_id: str | None = None
     latency_ms_median: float | None = None
     latency_ms_max: float | None = None
+    host: str | None = None
+    device: str | None = None
 
     def as_row(self) -> dict[str, object]:
         commit = self.commit or git_commit_info()
@@ -248,6 +281,8 @@ class MetricsRow:
             "latency_session_id": self.latency_session_id or "",
             "latency_ms_median": "" if self.latency_ms_median is None else self.latency_ms_median,
             "latency_ms_max": "" if self.latency_ms_max is None else self.latency_ms_max,
+            "host": host_label() if self.host is None else self.host,
+            "device": self.device or "",
         }
         row.update(self.metrics.as_dict())
         return {column: row[column] for column in METRICS_CSV_COLUMNS}
@@ -445,7 +480,8 @@ def append_metrics_row(
 
     既存ファイルのヘッダが ``METRICS_CSV_COLUMNS`` と異なる場合は ``ValueError``。
     列がずれた行が混ざるのを防ぐため、黙って合わせることはしない。新方式の推論時間の列を
-    足す前の csv（``LEGACY_METRICS_CSV_COLUMNS``）は、先に ``upgrade_metrics_csv`` で移行する。
+    足す前の csv（``LEGACY_METRICS_CSV_COLUMNS``）と host・device の列を足す前の csv
+    （``PRE_HOST_METRICS_CSV_COLUMNS``）は、先に ``upgrade_metrics_csv`` で移行する。
     """
     values = row.as_row() if isinstance(row, MetricsRow) else dict(row)
     missing = [column for column in METRICS_CSV_COLUMNS if column not in values]
@@ -461,9 +497,10 @@ def append_metrics_row(
     if exists:
         with path.open(encoding="utf-8", newline="") as handle:
             header = next(csv.reader(handle), [])
-        if tuple(header) == LEGACY_METRICS_CSV_COLUMNS:
+        if tuple(header) in _UPGRADES:
             raise ValueError(
-                "metrics.csv が推論時間の新方式の列を足す前の形式である。"
+                "metrics.csv が列（"
+                f"{', '.join(_UPGRADES[tuple(header)])}）を足す前の形式である。"
                 f"先に upgrade_metrics_csv({str(path)!r}) で列を足すこと"
             )
         if tuple(header) != METRICS_CSV_COLUMNS:
@@ -480,8 +517,10 @@ def append_metrics_row(
 
 
 def upgrade_metrics_csv(csv_path: str | Path = DEFAULT_METRICS_CSV) -> bool:
-    """列を足す前の metrics.csv に新方式の推論時間の列（``LATENCY_COLUMNS``）を足す。
+    """列を足す前の metrics.csv に、足りない列を末尾に足す。
 
+    ヘッダが ``LEGACY_METRICS_CSV_COLUMNS`` なら新方式の推論時間の列（``LATENCY_COLUMNS``）と
+    ``HOST_DEVICE_COLUMNS`` を、``PRE_HOST_METRICS_CSV_COLUMNS`` なら ``HOST_DEVICE_COLUMNS`` を足す。
     既存の列の順と値は変えない。各行の行末の直前に空欄の列（``,`` を列数分）を足すだけで、
     引用符・行末の種類（``\\n`` と ``\\r\\n`` が混在していても行ごとに）もそのまま残す。
     ヘッダ行だけは新しい列名を足す。
@@ -490,7 +529,7 @@ def upgrade_metrics_csv(csv_path: str | Path = DEFAULT_METRICS_CSV) -> bool:
         列を足したら True、既に新しい列構成なら False。
 
     Raises:
-        ValueError: ヘッダが旧・新どちらの列構成とも一致しない場合、列数がヘッダと合わない
+        ValueError: ヘッダがどの列構成とも一致しない場合、列数がヘッダと合わない
             行がある場合、または値の中に改行を含む行がある場合（行単位で足せないため）。
             いずれもファイルは変更しない。
     """
@@ -501,8 +540,9 @@ def upgrade_metrics_csv(csv_path: str | Path = DEFAULT_METRICS_CSV) -> bool:
     header = tuple(rows[0]) if rows else ()
     if header == METRICS_CSV_COLUMNS:
         return False
-    if header != LEGACY_METRICS_CSV_COLUMNS:
-        raise ValueError(f"metrics.csv のヘッダが旧・新どちらの列構成とも一致しない: {list(header)}")
+    if header not in _UPGRADES:
+        raise ValueError(f"metrics.csv のヘッダがどの列構成とも一致しない: {list(header)}")
+    added = _UPGRADES[header]
     lines = text.splitlines(keepends=True)
     if len(lines) != len(rows):
         raise ValueError("値の中に改行を含む行があり、行単位で列を足せない")
@@ -514,8 +554,8 @@ def upgrade_metrics_csv(csv_path: str | Path = DEFAULT_METRICS_CSV) -> bool:
         body = line.rstrip("\r\n")
         return body + suffix + line[len(body):]
 
-    out = [extend(lines[0], "," + ",".join(LATENCY_COLUMNS))]
-    out.extend(extend(line, "," * len(LATENCY_COLUMNS)) for line in lines[1:])
+    out = [extend(lines[0], "," + ",".join(added))]
+    out.extend(extend(line, "," * len(added)) for line in lines[1:])
     temporary = path.with_name(path.name + ".upgrading")
     with temporary.open("w", encoding="utf-8", newline="") as handle:
         handle.write("".join(out))
@@ -535,9 +575,11 @@ def run_and_record(
     csv_path: str | Path = DEFAULT_METRICS_CSV,
     repo_dir: str | Path | None = None,
     audio_loader: Callable[[Path], tuple[np.ndarray, int]] | None = None,
+    device: str | None = None,
 ) -> EvaluationResult:
     """評価を実行し、結果を metrics.csv に1行追記する。
 
+    ``device`` は推定器が使うデバイスの種類（metrics.csv の device 列。省略時は空欄）。
     ``split`` は評価に使った分割の名前（"dev" など）。テスト分割の区間を作るには
     ``build_eval_segments`` で ``stage10_approved=True`` が必要である。
     """
@@ -552,6 +594,7 @@ def run_and_record(
             latency_ms_per_inference=result.latency_ms_per_inference,
             model_size_bytes=model_size_bytes(model_path),
             commit=git_commit_info(repo_dir),
+            device=device,
         ),
         csv_path=csv_path,
     )
@@ -571,6 +614,7 @@ def run_and_record_clean_and_noisy(
     repo_dir: str | Path | None = None,
     audio_loader: Callable[[Path], tuple[np.ndarray, int]] | None = None,
     noise_source=None,
+    device: str | None = None,
 ) -> dict[str, EvaluationResult | SpeedRateMetrics]:
     """clean（dev）と noisy（dev_noisy の各 SNR とまとめ）を評価し、metrics.csv に追記する。
 
@@ -578,7 +622,7 @@ def run_and_record_clean_and_noisy(
     順（モジュール docstring「clean（dev）と noisy（dev_noisy）の記録」）。
     noisy の加工は ``spkrate.eval.noisy.degrade_waveform`` で、区間IDを clip_id として
     雑音を選ぶ。``noise_source`` を省くと設定の MUSAN を読む（相対パスは ``repo_dir``、
-    それも無ければ現在のディレクトリから解決する）。
+    それも無ければ現在のディレクトリから解決する）。``device`` は metrics.csv の device 列。
 
     ``segments`` にテスト分割を渡さないこと（``build_eval_segments`` が拒否する）。
 
@@ -602,7 +646,7 @@ def run_and_record_clean_and_noisy(
     rows.append(MetricsRow(experiment_id=experiment_id, method=method, config_path=config_path,
                            split="dev", metrics=clean.metrics,
                            latency_ms_per_inference=clean.latency_ms_per_inference,
-                           model_size_bytes=size, commit=commit))
+                           model_size_bytes=size, commit=commit, device=device))
 
     noisy_results: list[EvaluationResult] = []
     for snr_db in noisy_config.snr_db:
@@ -617,14 +661,14 @@ def run_and_record_clean_and_noisy(
         rows.append(MetricsRow(experiment_id=experiment_id, method=method, config_path=noisy_path,
                                split=split, metrics=result.metrics,
                                latency_ms_per_inference=clean.latency_ms_per_inference,
-                               model_size_bytes=size, commit=commit))
+                               model_size_bytes=size, commit=commit, device=device))
 
     pooled = pool_metrics((r.true_moras, r.pred_moras, r.durations) for r in noisy_results)
     outputs[NOISY_POOLED_SPLIT] = pooled
     rows.append(MetricsRow(experiment_id=experiment_id, method=method, config_path=noisy_path,
                            split=NOISY_POOLED_SPLIT, metrics=pooled,
                            latency_ms_per_inference=clean.latency_ms_per_inference,
-                           model_size_bytes=size, commit=commit))
+                           model_size_bytes=size, commit=commit, device=device))
 
     # 全条件の評価が終わってから追記する（途中で失敗したときに一部の行だけ残さない）。
     for row in rows:

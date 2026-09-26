@@ -15,9 +15,11 @@ import soundfile as sf
 from spkrate.eval.audio import TARGET_SAMPLE_RATE, load_audio, resample, to_mono
 from spkrate.eval.metrics import compute_metrics
 from spkrate.eval.runner import (
+    HOST_DEVICE_COLUMNS,
     LATENCY_COLUMNS,
     LEGACY_METRICS_CSV_COLUMNS,
     METRICS_CSV_COLUMNS,
+    PRE_HOST_METRICS_CSV_COLUMNS,
     CommitInfo,
     EvalSegment,
     MetricsRow,
@@ -220,8 +222,10 @@ def test_append_rejects_missing_or_unknown_columns(tmp_path):
 
 def test_latency_columns_are_appended_after_legacy_columns():
     assert METRICS_CSV_COLUMNS[: len(LEGACY_METRICS_CSV_COLUMNS)] == LEGACY_METRICS_CSV_COLUMNS
-    assert METRICS_CSV_COLUMNS[len(LEGACY_METRICS_CSV_COLUMNS):] == LATENCY_COLUMNS
+    assert PRE_HOST_METRICS_CSV_COLUMNS == (*LEGACY_METRICS_CSV_COLUMNS, *LATENCY_COLUMNS)
+    assert METRICS_CSV_COLUMNS == (*PRE_HOST_METRICS_CSV_COLUMNS, *HOST_DEVICE_COLUMNS)
     assert LATENCY_COLUMNS == ("latency_session_id", "latency_ms_median", "latency_ms_max")
+    assert HOST_DEVICE_COLUMNS == ("host", "device")
 
 
 def test_accuracy_row_leaves_latency_session_columns_empty(tmp_path):
@@ -233,6 +237,10 @@ def test_accuracy_row_leaves_latency_session_columns_empty(tmp_path):
     assert row["latency_session_id"] == ""
     assert row["latency_ms_median"] == ""
     assert row["latency_ms_max"] == ""
+
+
+# 列を足す前の csv に upgrade_metrics_csv が足す列（推論時間の新方式と host・device）。
+ADDED_TO_LEGACY = (*LATENCY_COLUMNS, *HOST_DEVICE_COLUMNS)
 
 
 def _write_legacy_csv(path: Path) -> list[list[str]]:
@@ -264,14 +272,14 @@ def test_upgrade_metrics_csv_keeps_existing_rows(tmp_path):
     assert len(rows) == 1 + len(legacy_rows)
     for old, new in zip(legacy_rows, rows[1:]):
         assert new[: len(old)] == old  # 既存の列の値は文字列のまま
-        assert new[len(old):] == [""] * len(LATENCY_COLUMNS)  # 新しい列は空欄
+        assert new[len(old):] == [""] * len(ADDED_TO_LEGACY)  # 新しい列は空欄
     # 既存行の各行は「元の行 + 空欄の列」になっている（引用符・行末も変わらない）。
     old_lines = before.splitlines(keepends=True)
     new_lines = csv_path.read_bytes().splitlines(keepends=True)
     assert len(new_lines) == len(old_lines)
     for old_line, new_line in zip(old_lines[1:], new_lines[1:]):
         body = old_line.rstrip(b"\r\n")
-        assert new_line == body + b"," * len(LATENCY_COLUMNS) + old_line[len(body):]
+        assert new_line == body + b"," * len(ADDED_TO_LEGACY) + old_line[len(body):]
 
     # 2回目は何もしない。移行後は追記できる。
     assert upgrade_metrics_csv(csv_path) is False
@@ -291,8 +299,8 @@ def test_upgrade_metrics_csv_keeps_mixed_line_endings(tmp_path):
     assert upgrade_metrics_csv(csv_path) is True
     lines = csv_path.read_bytes().splitlines(keepends=True)
     assert [line.endswith(b"\r\n") for line in lines] == [False, False, True]
-    assert lines[1] == raw[1] + b",,,\n"
-    assert lines[0].endswith(b",latency_session_id,latency_ms_median,latency_ms_max\n")
+    assert lines[1] == raw[1] + b",,,,,\n"
+    assert lines[0].endswith(b",latency_session_id,latency_ms_median,latency_ms_max,host,device\n")
 
 
 def test_append_to_legacy_csv_is_refused_until_upgraded(tmp_path):
@@ -302,6 +310,65 @@ def test_append_to_legacy_csv_is_refused_until_upgraded(tmp_path):
     with pytest.raises(ValueError, match="upgrade_metrics_csv"):
         append_metrics_row(_row(), csv_path=csv_path)
     assert csv_path.read_bytes() == before
+
+
+# --- 実行した計算機の列（host・device） -----------------------------------------
+
+
+def _write_pre_host_csv(path: Path) -> list[list[str]]:
+    """host・device の列を足す前の形式（今の results/metrics.csv と同じ列構成）の csv を書く。"""
+    rows = [
+        ["001-a", "2026-09-21T00:39:21+09:00", "abc", "clean", "configs/a.yaml", "envelope", "dev",
+         *["0.5"] * (len(LEGACY_METRICS_CSV_COLUMNS) - 9), "0.41", "", "", "", ""],
+        ["002-b", "2026-09-24T10:00:00+09:00", "def", "dirty", "configs/b.yaml", "cnn", "latency",
+         *[""] * (len(LEGACY_METRICS_CSV_COLUMNS) - 9), "", "2005357", "lat-1", "2.5", "3.1"],
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(PRE_HOST_METRICS_CSV_COLUMNS)
+        writer.writerows(rows)
+    return rows
+
+
+def test_upgrade_pre_host_csv_adds_empty_host_and_device(tmp_path):
+    csv_path = tmp_path / "metrics.csv"
+    old_rows = _write_pre_host_csv(csv_path)
+    before = csv_path.read_bytes().splitlines(keepends=True)
+
+    assert upgrade_metrics_csv(csv_path) is True
+    after = csv_path.read_bytes().splitlines(keepends=True)
+    assert after[0] == before[0].rstrip(b"\r\n") + b",host,device" + b"\r\n"
+    for old_line, new_line in zip(before[1:], after[1:]):
+        assert new_line == old_line.rstrip(b"\r\n") + b",," + b"\r\n"
+    with csv_path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.reader(handle))
+    assert tuple(rows[0]) == METRICS_CSV_COLUMNS
+    for old, new in zip(old_rows, rows[1:]):
+        assert new == [*old, "", ""]  # 既存の列と値は変えず、host・device は空欄
+    assert upgrade_metrics_csv(csv_path) is False
+
+
+def test_append_to_pre_host_csv_is_refused_until_upgraded(tmp_path):
+    csv_path = tmp_path / "metrics.csv"
+    _write_pre_host_csv(csv_path)
+    before = csv_path.read_bytes()
+    with pytest.raises(ValueError, match="upgrade_metrics_csv"):
+        append_metrics_row(_row(), csv_path=csv_path)
+    assert csv_path.read_bytes() == before
+
+
+def test_append_writes_host_and_device(tmp_path, monkeypatch):
+    from spkrate import device as device_utils
+
+    monkeypatch.setenv(device_utils.HOST_ENV_VAR, "ubuntu-desktop")
+    csv_path = tmp_path / "metrics.csv"
+    append_metrics_row(_row("001-a", device="cuda"), csv_path=csv_path)
+    append_metrics_row(_row("002-b", host="mac", device="mps"), csv_path=csv_path)
+    append_metrics_row(_row("003-c"), csv_path=csv_path)
+    with csv_path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(r["host"], r["device"]) for r in rows] == [
+        ("ubuntu-desktop", "cuda"), ("mac", "mps"), ("ubuntu-desktop", "")]
 
 
 def test_upgrade_metrics_csv_rejects_unknown_header_and_broken_rows(tmp_path):

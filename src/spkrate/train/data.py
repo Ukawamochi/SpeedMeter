@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Collection, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -176,6 +176,20 @@ class Batch:
             augment_applied=self.augment_applied,
             kinds=self.kinds,
             stretches=self.stretches,
+        )
+
+    def pin_memory(self) -> "Batch":
+        """テンソルをページ固定のメモリに置く（DataLoader の ``pin_memory=True`` が呼ぶ）。
+
+        ``pin_memory`` は cuda のときだけ有効にする（``spkrate.device.dataloader_device_kwargs``）。
+        このメソッドが無いと DataLoader は独自の型を固定せずにそのまま返す。
+        """
+        return replace(
+            self,
+            features=self.features.pin_memory(),
+            lengths=self.lengths.pin_memory(),
+            moras=self.moras.pin_memory(),
+            durations=self.durations.pin_memory(),
         )
 
 

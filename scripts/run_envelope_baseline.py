@@ -612,6 +612,7 @@ def evaluate_split(args: argparse.Namespace) -> None:
             csv_path=METRICS_CSV,
             repo_dir=ROOT,
             audio_loader=loader,
+            device="cpu",
         )
     finally:
         loader.close()
