@@ -277,3 +277,8 @@
 - 依存: Linux は cu130 の torch 2.14.0+cu130・torchaudio 2.11.0+cu130。macOS で解決される80件の版は変わらない（uv export で比較）。
 - log.txt と config_snapshot.yaml に、ホスト名・GPU名・torch/CUDA の版を記録する。metrics.csv の末尾に host（呼び名 mac/ubuntu-desktop、Public のため生のホスト名は書かない）と device の列を足した（既存29行は空欄）。
 - pytest（Mac）730 passed / 3 skipped（cuda が要る試験）。exp005 の作業ツリーは変えていない。exp005 の評価の追記は main を取り込んでから行う。
+
+### 2026-09-27 測定: 指示書 2026-09-26-rtx3060 タスク3（ubuntu-desktop の環境構築と試験）
+- scripts/sync_to_remote.sh・fetch_from_remote.sh を作り main にマージした（86a8929）。.git・作業ツリー・data（common_voice_ja・musan・processed）を送り、ファイル数とバイト数は3件とも一致した。
+- 遠隔機で uv sync --frozen 成功（torch 2.14.0+cu130、RTX 3060 を認識、TF32 無効）。pytest 730 passed / 3 skipped（mps 2件・CTC 重み未取得1件。cuda の試験は通った）。
+- 完走確認2件は cuda で完走した。1エポックは Mac の約24秒に対し約2秒。データ待ちの比率は 0.53〜0.67（num_workers 4 で 0.36〜0.58）。メモリの used は最大約5.2GiB。結果は 010 の4節、出力は runs/*_cuda* に戻した。
