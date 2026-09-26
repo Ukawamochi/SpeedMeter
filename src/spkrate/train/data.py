@@ -136,6 +136,9 @@ class ClipItem:
         clip_id: クリップの識別子。
         augment_applied: 実際に掛かった拡張の名前（``AugmentResult.effective`` と
             周波数マスクの ``freq_mask``）。拡張なしの経路では空。
+        kind: 方式Bの窓の種類（``single`` / ``concat``。spkrate.train.method_b）。
+            方式Aのクリップと無音サンプルでは空。
+        stretch: 方式Bの窓の伸縮率（伸縮なしは1.0）。
     """
 
     features: np.ndarray
@@ -143,6 +146,8 @@ class ClipItem:
     duration_sec: float
     clip_id: str
     augment_applied: tuple[str, ...] = ()
+    kind: str = ""
+    stretch: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -155,6 +160,8 @@ class Batch:
     durations: torch.Tensor  # (バッチ,) float32  クリップ長（秒）
     clip_ids: tuple[str, ...]
     augment_applied: tuple[tuple[str, ...], ...] = ()  # 件ごとの実際に掛かった拡張
+    kinds: tuple[str, ...] = ()  # 件ごとの方式Bの窓の種類（ClipItem.kind）
+    stretches: tuple[float, ...] = ()  # 件ごとの方式Bの窓の伸縮率
 
     def __len__(self) -> int:
         return int(self.features.shape[0])
@@ -167,6 +174,8 @@ class Batch:
             durations=self.durations.to(device),
             clip_ids=self.clip_ids,
             augment_applied=self.augment_applied,
+            kinds=self.kinds,
+            stretches=self.stretches,
         )
 
 
@@ -198,6 +207,8 @@ def collate_clips(items: Sequence[ClipItem]) -> Batch:
         ),
         clip_ids=tuple(item.clip_id for item in items),
         augment_applied=tuple(tuple(getattr(item, "augment_applied", ())) for item in items),
+        kinds=tuple(str(getattr(item, "kind", "")) for item in items),
+        stretches=tuple(float(getattr(item, "stretch", 1.0)) for item in items),
     )
 
 
