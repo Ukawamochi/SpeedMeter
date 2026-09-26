@@ -269,3 +269,4 @@
 
 ### 2026-09-26 統括: 指示書 2026-09-26-rtx3060 タスク1の後（人間の作業待ちで停止）
 - ubuntu-desktop に git と tmux が無く、導入に sudo が要る。人間が `sudo apt install git tmux` を行うと決まった。導入が済むまで停止する（questions.md に記録）。exp005 は Mac で学習を続けている。
+- 追記: 人間が ubuntu-desktop に git（2.53.0）と tmux（3.6）を導入したことを ssh で確認し、010-compute-environment.md に反映した。
