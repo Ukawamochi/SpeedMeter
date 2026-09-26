@@ -126,7 +126,8 @@ def main(argv: list[str] | None = None) -> int:
 
     rows = [latency_csv_row(session.results[e], session.session_id, experiment_id=e, method=m,
                             config_path=c, model_size_bytes=model_size_bytes(p),
-                            commit_hash=commit.commit_hash, commit_dirty=commit.dirty_flag)
+                            commit_hash=commit.commit_hash, commit_dirty=commit.dirty_flag,
+                            device=device.type)
             for e, m, c, p in zip(ids, methods, configs, checkpoints)]
     if not args.no_metrics_csv:
         for row in rows:

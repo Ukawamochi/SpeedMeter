@@ -1934,6 +1934,7 @@ def _append_metrics_csv(
             metrics=metrics,
             latency_ms_per_inference=float(best.get("val_forward_ms_per_clip", float("nan"))),
             model_size_bytes=model_size_bytes(run_dir / "checkpoint_best.pt"),
+            device=resolve_device(config.device).type,
         ),
         csv_path=config.train.metrics_csv,
     )

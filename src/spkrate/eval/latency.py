@@ -258,11 +258,17 @@ def latency_csv_row(
     commit_hash: str,
     commit_dirty: str,
     timestamp: str | None = None,
+    device: str = "",
+    host: str | None = None,
 ) -> dict[str, object]:
     """新方式の測定結果を metrics.csv の1行（``append_metrics_row`` に渡す辞書）にする。
 
     精度の指標列と旧方式の ``latency_ms_per_inference`` は空欄。``split`` は ``LATENCY_SPLIT``。
+    ``device`` は測ったデバイスの種類、``host`` は計算機の呼び名（省略時は
+    ``spkrate.device.host_label``）。
     """
+    from spkrate.device import host_label
+
     row: dict[str, object] = {column: "" for column in METRIC_COLUMNS}
     row.update({
         "experiment_id": experiment_id,
@@ -277,6 +283,8 @@ def latency_csv_row(
         "latency_session_id": session_id,
         "latency_ms_median": result.median_ms,
         "latency_ms_max": result.max_ms,
+        "host": host_label() if host is None else host,
+        "device": device,
     })
     return row
 

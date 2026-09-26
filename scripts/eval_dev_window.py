@@ -378,6 +378,11 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 
     if args.append_metrics:
         size = model_size_bytes(_resolve(CHECKPOINT))
+        # host・device 列: exp004 は予測を作った計算機とデバイス（predict_meta.json）、包絡は cpu。
+        meta_path = out_dir / "predict_meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+        predict_host = (meta.get("host") or {}).get("host_label")
+        predict_device = str(meta["device"]).split(":")[0] if meta.get("device") else None
         durations = [W_SEC] * int(keep.sum())
         split_names = {"clean": "dev_window", **{n: f"dev_window_noisy_{n}" for n in conditions[1:]}}
         for method in METHODS:
@@ -400,6 +405,8 @@ def cmd_summarize(args: argparse.Namespace) -> int:
                     config_path=config_path, split=split, metrics=metrics,
                     latency_ms_per_inference=float("nan"),
                     model_size_bytes=size if method == "exp004" else None,
+                    host=predict_host,
+                    device=predict_device if method == "exp004" else "cpu",
                 ), csv_path=_resolve("results/metrics.csv"))
                 log(f"metrics.csv: {EXPERIMENT_IDS[method]} {split} mae={metrics.mae_moras_per_sec:.4f}")
     log("SUMMARIZE_DONE")

@@ -229,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             metrics=metrics,
             latency_ms_per_inference=latency["total_ms"],
             model_size_bytes=size,
+            device=device.type,
         )]
         for split, noisy_metric in noisy_metrics.items():
             rows.append(MetricsRow(
@@ -239,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
                 metrics=noisy_metric,
                 latency_ms_per_inference=latency["total_ms"],
                 model_size_bytes=size,
+                device=device.type,
             ))
         for row in rows:
             append_metrics_row(row, csv_path=args.metrics_csv)
