@@ -10,3 +10,4 @@
 | exp005 | mac | mps | 実行中 | 2026-09-26 14:34 | — | configs/exp005.yaml（方式B） |
 | exp000_method_b_smoke_cuda | ubuntu-desktop | cuda | 完了 | 2026-09-27 00:08 | 2026-09-27 00:08 | 完走確認（1エポック）。010 の4.4節 |
 | exp000_method_a_selection_smoke_cuda | ubuntu-desktop | cuda | 完了 | 2026-09-27 00:08 | 2026-09-27 00:08 | 完走確認（1エポック）。010 の4.4節 |
+| exp006 | ubuntu-desktop | cuda | 実行中 | 2026-09-27 00:16 | — | configs/exp006.yaml（方式Aの対照）。exp/011-method-a-control の f70044e |
