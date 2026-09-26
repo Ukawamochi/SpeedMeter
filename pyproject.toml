@@ -38,5 +38,22 @@ dev = [
     "pytest>=9.1.1",
 ]
 
+# Linux（ubuntu-desktop、RTX 3060・ドライバ 595・CUDA 13.2）では PyTorch 公式の cu130 版の
+# torch・torchaudio を使う。macOS では従来どおり PyPI の torch・torchaudio（mps）を使う。
+# cu130 は torch 2.14.0 と torchaudio 2.11.0 の両方があり、macOS と同じ版にそろえられる
+# （cu132 には torchaudio 2.11.0 が無い）。docs/directives/2026-09-26-rtx3060.md タスク2。
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
+]
+torchaudio = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
