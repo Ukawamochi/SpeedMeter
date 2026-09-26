@@ -457,6 +457,12 @@ def test_training_writes_metrics_jsonl_and_checkpoints(tmp_path: Path) -> None:
     assert run_dir == outcome.run_dir
     assert (run_dir / "log.txt").is_file()
     assert (run_dir / "config_snapshot.yaml").is_file()
+    # 実行した計算機の記録（ホスト名・デバイス名・torch と CUDA の版）
+    log_text = (run_dir / "log.txt").read_text(encoding="utf-8")
+    assert "計算機: ホスト名=" in log_text and "デバイス=cpu" in log_text
+    assert f"torch={torch.__version__}" in log_text and "CUDA=" in log_text
+    snapshot = yaml.safe_load((run_dir / "config_snapshot.yaml").read_text(encoding="utf-8"))
+    assert snapshot["host"]["device"] == "cpu" and snapshot["host"]["hostname"]
     assert (run_dir / "checkpoint_last.pt").is_file()
     assert (run_dir / "checkpoint_best.pt").is_file()
 

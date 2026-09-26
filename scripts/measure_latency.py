@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmup", type=int, default=DEFAULT_WARMUP)
     parser.add_argument("--no-interleave", action="store_true",
                         help="交互測定をせずモデルごとに連続して測る（比較用。既定は交互測定）")
-    parser.add_argument("--device", default=None, help="既定は mps（使えなければ cpu で警告）")
+    parser.add_argument("--device", default=None, help="mps・cuda・cpu（既定 mps）。使えない場合は開始前に止める")
     parser.add_argument("--metrics-csv", default=str(DEFAULT_METRICS_CSV),
                         help="追記先の csv（動作確認ではテスト用の出力先を渡す）")
     parser.add_argument("--no-metrics-csv", action="store_true", help="csv に追記しない")
@@ -99,12 +99,13 @@ def main(argv: list[str] | None = None) -> int:
                zip(_per_model(args.config, len(checkpoints), "config"), checkpoints)]
     methods = [m or DEFAULT_METHOD for m in _per_model(args.method, len(checkpoints), "method")]
 
-    if args.device:
-        device = torch.device(args.device)
-    else:
-        device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    from spkrate.device import setup_device
+
+    # 使えないデバイスを指定したら止める（cpu に落とさない）。比較に使う推論時間は Mac の mps で測る
+    # （docs/directives/2026-09-26-rtx3060.md 0節4）。
+    device, _ = setup_device(args.device or "mps", logger)
     if device.type != "mps":
-        logger.warning("%s で測る（CLAUDE.md の学習デバイスは mps）", device)
+        logger.warning("%s で測る（比較に使う推論時間は Mac の mps で測る）", device)
 
     normalizer = load_normalization(NORMALIZATION)
     inferences = {}

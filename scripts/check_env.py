@@ -1,6 +1,7 @@
 """環境確認スクリプト。
 
 Python/torchのバージョン、MPSの利用可否、MPS上でのConv2d順伝播、
+CUDAの利用可否・GPUの名前・CUDA上でのConv2d順伝播（TF32を無効にして実行）、
 pyopenjtalkによる読み変換が動作するかを出力する。
 """
 
@@ -38,6 +39,30 @@ def check_mps_conv2d(mps_available: bool) -> None:
         print(f"mps Conv2d forward: FAILED ({e})")
 
 
+def check_cuda() -> None:
+    available = torch.cuda.is_available()
+    print(f"torch.version.cuda: {torch.version.cuda}")
+    print(f"torch.cuda.is_available(): {available}")
+    if not available:
+        print("cuda Conv2d forward: skipped (cuda unavailable)")
+        return
+    try:
+        from spkrate.device import configure_backends
+
+        device = torch.device("cuda")
+        print(f"cuda device: {torch.cuda.get_device_name(device)} "
+              f"(capability {'.'.join(map(str, torch.cuda.get_device_capability(device)))}, "
+              f"cuDNN {torch.backends.cudnn.version()})")
+        print(f"TF32 settings: {configure_backends(device)}")
+        conv = torch.nn.Conv2d(in_channels=1, out_channels=4, kernel_size=3).to(device)
+        x = torch.randn(1, 1, 16, 16, device=device)
+        y = conv(x)
+        torch.cuda.synchronize()
+        print(f"cuda Conv2d forward: OK (output shape={tuple(y.shape)})")
+    except Exception as e:
+        print(f"cuda Conv2d forward: FAILED ({e})")
+
+
 def check_pyopenjtalk() -> None:
     try:
         import pyopenjtalk
@@ -54,6 +79,7 @@ def main() -> None:
     check_torch_version()
     mps_available = check_mps_available()
     check_mps_conv2d(mps_available)
+    check_cuda()
     check_pyopenjtalk()
 
 

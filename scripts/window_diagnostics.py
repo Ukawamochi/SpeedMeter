@@ -98,6 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--experiment-id", default=EXPERIMENT_ID)
     parser.add_argument("--output-json", default=OUTPUT_JSON)
     parser.add_argument("--output-md", default=OUTPUT_MD)
+    parser.add_argument("--device", default="mps",
+                        help="mps・cuda・cpu（既定 mps）。使えない場合は開始前に止める")
     parser.add_argument("--musan-noise-split", default=None,
                         help="MUSAN noise の分割ファイル（D2 は評価用だけを使う）。必須")
     args = parser.parse_args(argv)
@@ -108,10 +110,10 @@ def main(argv: list[str] | None = None) -> int:
                         format="%(asctime)s %(levelname)s %(message)s")
     logger = logging.getLogger("window_diagnostics")
 
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    from spkrate.device import setup_device
+
+    device, _ = setup_device(args.device, logger)
     log(f"device={device} mps_available={torch.backends.mps.is_available()}")
-    if device.type != "mps":
-        logger.warning("mps が使えないため %s で実行する（CLAUDE.md の規定は mps）", device)
 
     model, payload = load_checkpoint(args.checkpoint, map_location="cpu")
     model = model.to(device).eval()

@@ -118,9 +118,9 @@ def cmd_predict(args: argparse.Namespace) -> int:
     audio = DevWindowAudio(config, paths, noise_source=noise_source)
     W = config.window_samples
 
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    if device.type != "mps":
-        logger.warning("mps が使えないため %s で実行する（CLAUDE.md の規定は mps）", device)
+    from spkrate.device import setup_device, synchronize
+
+    device, device_record = setup_device(args.device, logger)
     model, payload = load_checkpoint(str(_resolve(CHECKPOINT)), map_location="cpu")
     model = model.to(device).eval()
     normalizer = load_normalization(_resolve(NORMALIZATION))
@@ -154,8 +154,7 @@ def cmd_predict(args: argparse.Namespace) -> int:
             index_parts.append(np.arange(lo, hi, dtype=np.int64))
         t0 = time.perf_counter()
         model_mora = predict(waves) if waves else np.zeros(0, dtype=np.float32)
-        if device.type == "mps":
-            torch.mps.synchronize()
+        synchronize(device)
         t_model = time.perf_counter() - t0
         index = np.concatenate(index_parts) if index_parts else np.zeros(0, dtype=np.int64)
         env_mora = np.asarray(env, dtype=np.float32)
@@ -246,7 +245,7 @@ def cmd_predict(args: argparse.Namespace) -> int:
         meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
         meta.setdefault("timing", {}).update(timing)
         meta.update({"commit": _commit(), "checkpoint": CHECKPOINT, "best_epoch": int(payload["epoch"]),
-                     "device": str(device), "batch_size": args.batch_size,
+                     "device": str(device), "host": device_record, "batch_size": args.batch_size,
                      "chunk_sources": args.chunk_sources, "windows": len(ws),
                      "mps_cpu_fallback_events": meta.get("mps_cpu_fallback_events", []) + watcher.events})
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -417,6 +416,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--chunk-sources", type=int, default=500)
     p.add_argument("--sample-sources", type=int, default=0, help="見積もり用に無作為に選ぶ音源の数")
     p.add_argument("--seed", type=int, default=20260926)
+    p.add_argument("--device", default="mps",
+                   help="mps・cuda・cpu（既定 mps）。使えない場合は開始前に止める")
     p.set_defaults(func=cmd_predict)
     s = sub.add_parser("summarize")
     s.add_argument("--out-dir", default=OUT_DIR)

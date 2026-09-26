@@ -6,7 +6,7 @@
 - 評価データ: data/processed/features/dev（configs/splits/dev.json の話者）。test.json は使わない
 - 指標: ``spkrate.train.train.evaluate_dev``（学習中の dev 評価と同じ）。バッチ64、長さ順バケッティング
 - 1推論あたりの処理時間（旧方式）: docs/spec.md の推論単位である 2.0秒窓（32000標本）1回あたり。
-  対数メル計算 → 正規化 → mps でのモデル前向き計算 までを1回として測る
+  対数メル計算 → 正規化 → デバイス（既定 mps）でのモデル前向き計算 までを1回として測る
   （音声の読み込み・再標本化は含めない。第3段階のベースラインの測り方に合わせる）。
   ウォームアップ20回の後200回の**平均**を ``latency_ms_per_inference`` 列に書く。
   この値はモデルごとに別のプロセス・時刻で測るため、**モデル間の比較には使わない**
@@ -26,6 +26,10 @@
     PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python scripts/eval_dev_full.py \\
         --run-dir runs/exp002 --experiment-id 007-augmentation --config configs/exp002.yaml \\
         --method "cnn (話速推定CNN、方式A: クリップ全体入力、拡張あり)"
+
+デバイスは ``--device``（mps・cuda・cpu、既定 mps）。使えない場合は開始前に止める。cuda では
+TF32 を無効にし、DataLoader の pin_memory を有効にする（``spkrate.device``）。推論時間の比較は
+Mac（mps）で ``scripts/measure_latency.py`` によって行う（2026-09-26-rtx3060 0節4）。
 
 動作確認（先頭200件、metrics.csv には書かず別の csv へ）:
     PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python scripts/eval_dev_full.py \
@@ -47,6 +51,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from spkrate.data.splits import load_clip_records, load_split
+from spkrate.device import dataloader_device_kwargs, setup_device, synchronize
 from spkrate.eval.noisy import (
     DEFAULT_NOISY_CONFIG,
     NoisyClipDataset,
@@ -93,14 +98,12 @@ def measure_latency(model, normalizer, device, *, warmup=20, repeats=200):
     with torch.no_grad():
         for _ in range(warmup):
             model(tensor, lengths)
-        if device.type == "mps":
-            torch.mps.synchronize()
+        synchronize(device)
         # 前向き計算のみ
         t0 = time.perf_counter()
         for _ in range(repeats):
             model(tensor, lengths)
-            if device.type == "mps":
-                torch.mps.synchronize()
+            synchronize(device)
         forward_ms = (time.perf_counter() - t0) / repeats * 1000.0
         # 対数メル計算 → 正規化 → 前向き計算（ベースラインと同じ範囲）
         t0 = time.perf_counter()
@@ -109,8 +112,7 @@ def measure_latency(model, normalizer, device, *, warmup=20, repeats=200):
             x = torch.from_numpy(np.ascontiguousarray(f[None], dtype=np.float32)).to(device)
             n = torch.tensor([f.shape[0]], dtype=torch.long, device=device)
             model(x, n)
-            if device.type == "mps":
-                torch.mps.synchronize()
+            synchronize(device)
         total_ms = (time.perf_counter() - t0) / repeats * 1000.0
     return {"frames": int(feature.shape[0]), "forward_only_ms": forward_ms, "total_ms": total_ms,
             "warmup": warmup, "repeats": repeats}
@@ -135,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=None,
                         help="dev の先頭この件数だけを評価する（動作確認用）")
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--device", default="mps",
+                        help="mps・cuda・cpu（既定 mps）。使えない場合は開始前に止める")
     parser.add_argument("--noisy-num-workers", type=int, default=0,
                         help="dev_noisy の DataLoader のワーカー数。実測（dev 2,000件、加工と対数メルのみ）で"
                              "0が約316件/秒、2が約137件/秒、4が約80件/秒と、0が最も速かった")
@@ -148,9 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = Path(args.output_dir) if args.output_dir else run_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    if device.type != "mps":
-        logger.warning("mps が使えないため %s で実行する（CLAUDE.md の規定は mps）", device)
+    device, device_record = setup_device(args.device, logger)
     checkpoint = str(run_dir / "checkpoint_best.pt")
     model, payload = load_checkpoint(checkpoint, map_location="cpu")
     model = model.to(device).eval()
@@ -163,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     sampler = LengthBucketBatchSampler(dataset.frame_counts, BATCH, shuffle=False,
                                        pool_batches=20, seed=0)
     loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate_clips,
-                        num_workers=args.num_workers)
+                        num_workers=args.num_workers, **dataloader_device_kwargs(device))
 
     noisy_config = None
     noisy_records = []
@@ -196,7 +198,8 @@ def main(argv: list[str] | None = None) -> int:
                                                          shuffle=False, pool_batches=20, seed=0)
                 noisy_loader = DataLoader(noisy_dataset, batch_sampler=noisy_sampler,
                                           collate_fn=collate_clips,
-                                          num_workers=args.noisy_num_workers)
+                                          num_workers=args.noisy_num_workers,
+                                          **dataloader_device_kwargs(device))
                 started = time.perf_counter()
                 m, e, p = evaluate_dev(model, noisy_loader, build_loss("mse"), device)
                 e["wall_sec"] = time.perf_counter() - started
@@ -243,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
                "metrics": metrics.as_dict(), "extras": extras, "latency": latency,
                "model_size_bytes": size, "checkpoint": checkpoint,
                "limit": args.limit,
+               "host": device_record,
                "noisy_config": None if args.no_noisy else args.noisy_config,
                "noisy_metrics": {k: v.as_dict() for k, v in noisy_metrics.items()},
                "noisy_extras": noisy_extras,

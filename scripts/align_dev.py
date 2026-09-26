@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
+from spkrate.device import describe_environment
 from spkrate.labels.alignment import HiraganaAligner, align_clips_to_jsonl, select_dev_clips
 
 
@@ -29,7 +30,7 @@ def main() -> int:
     ap.add_argument("--dev", default="configs/splits/dev.json")
     ap.add_argument("--num", type=int, default=None, help="処理する件数（省略時は dev 全件）")
     ap.add_argument("--seed", type=int, default=20260925, help="--num 指定時の抽出の種")
-    ap.add_argument("--device", default="mps")
+    ap.add_argument("--device", default="mps", help="mps・cuda・cpu。使えない場合は開始前に止める")
     ap.add_argument("--no-resume", action="store_true", help="既存の出力を上書きする")
     ap.add_argument("--log-every", type=int, default=100)
     args = ap.parse_args()
@@ -44,6 +45,7 @@ def main() -> int:
     aligner = HiraganaAligner(args.device)
     aligner.emission(np.zeros(16000 * 2, dtype=np.float32))  # MPS の初回カーネル生成
     log.info("モデル読み込み %.1f 秒（device=%s）", time.perf_counter() - t0, args.device)
+    log.info("%s", describe_environment(aligner.environment))
 
     stats = align_clips_to_jsonl(
         records, Path(args.out), aligner.align, resume=not args.no_resume, log_every=args.log_every

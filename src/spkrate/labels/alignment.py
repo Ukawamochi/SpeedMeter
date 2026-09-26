@@ -264,13 +264,22 @@ def align_clip(
 
 # ---------------------------------------------------------------- 音響モデル
 class HiraganaAligner:
-    """ひらがなCTCモデル（コミット固定）の放出確率を求める。"""
+    """ひらがなCTCモデル（コミット固定）の放出確率を求める。
+
+    ``device`` は mps・cuda・cpu。使えないデバイスを指定すると、モデルを読む前に
+    ``spkrate.device.DeviceUnavailableError`` で止める（cpu に落とさない）。cuda では
+    学習・評価と同じく TF32 を無効にする。実行した計算機の記録は ``environment`` に持つ。
+    """
 
     def __init__(self, device: str = "mps") -> None:
         from huggingface_hub import hf_hub_download
         from transformers import Wav2Vec2ForCTC
 
-        self.device = device
+        from spkrate.device import configure_backends, environment_info, resolve_device
+
+        self.device = resolve_device(device)
+        self.environment = environment_info(self.device)
+        self.environment["backends"] = configure_backends(self.device)
         self.model = (
             Wav2Vec2ForCTC.from_pretrained(HIRAGANA_MODEL, revision=HIRAGANA_REVISION)
             .to(device)

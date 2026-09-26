@@ -40,8 +40,14 @@ docs/decisions/005-window-strategy.md の方式Aで学習する。1件の入力�
 
 ## デバイスとMPS
 
-CLAUDE.md の規定により学習デバイスは ``mps``、float64 は使わない、``torch.compile`` は
-使わない。MPS未対応の演算によるCPUフォールバックが起きた場合は、PyTorch が出す警告を
+学習デバイスは ``mps`` または ``cuda``（docs/directives/2026-09-26-rtx3060.md 0節2）、float64・
+``torch.compile``・混合精度は使わない。設定の ``device`` には ``mps``・``cuda``・``cpu`` を書ける。
+指定したデバイスが使えない場合は開始前に止める（``spkrate.device.resolve_device``。黙って
+cpu に落とさない）。cuda のときは開始時に TF32 を無効にし（``spkrate.device.configure_backends``）、
+その値と、ホスト名・デバイス名（GPU の名前）・torch と CUDA の版を log.txt と
+config_snapshot.yaml に書く。DataLoader の ``pin_memory`` は cuda のときだけ有効にする。
+
+MPS未対応の演算によるCPUフォールバックが起きた場合は、PyTorch が出す警告を
 ``MpsFallbackWatcher`` が捕まえ、演算子の名前と発生箇所（Pythonの呼び出し位置）を
 ``log.txt`` に記録する。環境変数 ``PYTORCH_ENABLE_MPS_FALLBACK`` が未設定のときは
 フォールバックせず例外になるので、その場合も例外の内容がログに残る。
@@ -174,6 +180,8 @@ import yaml
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 
+from spkrate import device as device_utils
+from spkrate.device import DeviceUnavailableError
 from spkrate.data.augment import (
     AUGMENTATIONS,
     AugmentConfig,
@@ -576,20 +584,17 @@ def build_loss(name: str) -> Callable[[Tensor, Tensor], Tensor]:
 
 
 def resolve_device(name: str, logger: logging.Logger | None = None) -> torch.device:
-    """設定のデバイス名を ``torch.device`` にする。
+    """設定のデバイス名を ``torch.device`` にする（``spkrate.device.resolve_device``）。
 
-    CLAUDE.md の規定では ``mps`` を使う。``mps`` が使えない環境では警告を出して
-    ``cpu`` に落とす（黙って落とすと、どこで学習したのか後から分からなくなるため
-    必ずログに残す）。``auto`` は使える方を選ぶ。
+    書けるのは ``mps``・``cuda``・``cpu``。指定したデバイスが使えない場合は
+    ``DeviceUnavailableError`` を送出して止める（cpu には落とさない）。誤りはログにも残す。
     """
     log = logger or logging.getLogger(LOGGER_NAME)
-    available = torch.backends.mps.is_available()
-    if name == "auto":
-        return torch.device("mps" if available else "cpu")
-    if name == "mps" and not available:
-        log.warning("mps が使えないため cpu で実行する（CLAUDE.md の規定は mps）")
-        return torch.device("cpu")
-    return torch.device(name)
+    try:
+        return device_utils.resolve_device(name)
+    except (ValueError, DeviceUnavailableError) as error:
+        log.error("デバイスの指定の誤りで停止する: %s", error)
+        raise
 
 
 class MpsFallbackWatcher:
@@ -708,16 +713,26 @@ def write_config_snapshot(
     run_dir: Path,
     device: torch.device,
     extra: dict[str, Any] | None = None,
+    device_record: dict[str, Any] | None = None,
 ) -> Path:
     """``runs/<実験ID>/config_snapshot.yaml`` を書く（PLAN.md 5-2 の要求）。
 
     gitのコミットハッシュ、設定ファイルの中身（元のテキストと解決後の値）、モデル構造と
     その要約、乱数シード、デバイス、ライブラリの版を残す。後からこのファイルだけで
     実行条件が分かるようにするためである。
+
+    ``host`` には実行した計算機（ホスト名、デバイス名＝cuda なら GPU の名前、torch・CUDA・
+    cuDNN の版、cuda なら TF32 の設定値）を書く。``device_record`` は
+    ``spkrate.device.setup_device`` の戻り値で、省略時はここで ``device`` から作る。
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     commit = git_commit_info()
     model = SpeechRateCNN(model_config)
+    if device_record is None:
+        device_record = device_utils.environment_info(device)
+        device_record["backends"] = (
+            device_utils.describe_backends() if device.type == "cuda" else {}
+        )
 
     snapshot: dict[str, Any] = {
         "experiment_id": config.experiment_id,
@@ -725,6 +740,7 @@ def write_config_snapshot(
         "git": {"commit_hash": commit.commit_hash, "dirty": commit.dirty},
         "seed": config.seed,
         "device": str(device),
+        "host": _json_safe(device_record),
         "config_path": config.config_path,
         "config": _json_safe(config.as_dict()),
         "train_source": config.train_source,
@@ -735,8 +751,10 @@ def write_config_snapshot(
             "python": platform.python_version(),
             "platform": platform.platform(),
             "torch": torch.__version__,
+            "cuda": torch.version.cuda,
             "numpy": np.__version__,
             "mps_available": bool(torch.backends.mps.is_available()),
+            "cuda_available": bool(torch.cuda.is_available()),
             "pytorch_enable_mps_fallback": os.environ.get(
                 "PYTORCH_ENABLE_MPS_FALLBACK", ""
             ),
@@ -1130,14 +1148,21 @@ def _make_loader(
     shuffle: bool,
     settings: TrainSettings,
     seed: int,
+    device: torch.device | None = None,
 ) -> DataLoader:
-    """DataLoader を作る。長さでまとめる設定なら専用のバッチ分けを使う。"""
+    """DataLoader を作る。長さでまとめる設定なら専用のバッチ分けを使う。
+
+    ``pin_memory`` など cuda 向けの設定は ``device`` が cuda のときだけ有効にする
+    （``spkrate.device.dataloader_device_kwargs``。mps・cpu・省略時は従来どおり無効）。
+    """
     counts = _frame_counts(dataset)
     common: dict[str, Any] = {
         "collate_fn": collate_clips,
         "num_workers": settings.num_workers,
         "pin_memory": False,
     }
+    if device is not None:
+        common.update(device_utils.dataloader_device_kwargs(device))
     if settings.bucketing and counts is not None:
         sampler = LengthBucketBatchSampler(
             counts,
@@ -1299,8 +1324,7 @@ def evaluate_dev(
         batch = batch.to(device)
         started = time.perf_counter()
         prediction = model(batch.features, batch.lengths)
-        if device.type == "mps":
-            torch.mps.synchronize()
+        _synchronize(device)
         forward_seconds += time.perf_counter() - started
         loss = loss_fn(prediction, batch.moras)
         total_loss += float(loss.detach().cpu()) * len(batch)
@@ -1328,10 +1352,7 @@ def evaluate_dev(
 
 def _synchronize(device: torch.device) -> None:
     """非同期のデバイスで計算の完了を待つ（計時を正しくするため）。"""
-    if device.type == "mps":
-        torch.mps.synchronize()
-    elif device.type == "cuda":
-        torch.cuda.synchronize()
+    device_utils.synchronize(device)
 
 
 def _set_seed(seed: int) -> None:
@@ -1555,6 +1576,7 @@ def run_training(
     best_mode = config.train.resolved_best_mode
     _set_seed(config.seed)
     device = resolve_device(config.device, log)
+    device, device_record = device_utils.setup_device(device, log)
     log.info(
         "実験ID=%s デバイス=%s 損失=%s シード=%d 上限エポック数（通算）=%d バッチ=%d",
         config.experiment_id,
@@ -1635,6 +1657,7 @@ def run_training(
         shuffle=True,
         settings=config.train,
         seed=config.seed,
+        device=device,
     )
     dev_loader = _make_loader(
         dev_dataset,
@@ -1642,6 +1665,7 @@ def run_training(
         shuffle=False,
         settings=config.train,
         seed=config.seed,
+        device=device,
     )
 
     write_config_snapshot(
@@ -1649,6 +1673,7 @@ def run_training(
         model_config,
         run_dir=run_dir,
         device=device,
+        device_record=device_record,
         extra={
             "dataset": {
                 "num_train_clips": len(train_dataset),  # type: ignore[arg-type]
@@ -1928,7 +1953,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--epochs", type=int, default=None, help="上限エポック数（通算）を上書きする"
     )
-    parser.add_argument("--device", default=None, help="デバイスを上書きする（mps/cpu）")
+    parser.add_argument("--device", default=None, help="デバイスを上書きする（mps/cuda/cpu）")
     parser.add_argument("--seed", type=int, default=None, help="乱数シードを上書きする")
     return parser
 

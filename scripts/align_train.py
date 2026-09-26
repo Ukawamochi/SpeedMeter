@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
+from spkrate.device import describe_environment
 from spkrate.labels.alignment import HIRAGANA_REVISION, HiraganaAligner, select_dev_clips
 from spkrate.labels.train_selection import measure_clip, measure_clips_to_jsonl
 
@@ -41,7 +42,7 @@ def main() -> int:
     ap.add_argument("--split", default="configs/splits/train.json", help="対象の話者の分割（test.json は不可）")
     ap.add_argument("--num", type=int, default=None, help="処理する件数（省略時は全件。試行用）")
     ap.add_argument("--seed", type=int, default=20260926, help="--num 指定時の抽出の種")
-    ap.add_argument("--device", default="mps")
+    ap.add_argument("--device", default="mps", help="mps・cuda・cpu。使えない場合は開始前に止める")
     ap.add_argument("--log-every", type=int, default=1000)
     args = ap.parse_args()
     if Path(args.split).name == "test.json":
@@ -60,6 +61,7 @@ def main() -> int:
     aligner = HiraganaAligner(args.device)
     aligner.emission(np.zeros(16000 * 2, dtype=np.float32))  # MPS の初回カーネル生成
     log.info("モデル読み込み %.1f 秒（device=%s）", time.perf_counter() - t0, args.device)
+    log.info("%s", describe_environment(aligner.environment))
 
     fn = partial(measure_clip, emission_fn=aligner.emission, vocab=aligner.vocab, blank=aligner.blank)
     stats = measure_clips_to_jsonl(
