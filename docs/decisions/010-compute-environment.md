@@ -106,7 +106,80 @@ Mac 側の rsync は openrsync（protocol version 29）である。
 
 ## 4. 完走確認の結果（タスク3）
 
-（タスク3で追記する）
+実施日: 2026-09-27 0:00〜0:10 頃（JST）。遠隔機のコミットは feat/remote-sync の 9fbfbb9（main f7d147e に下記 4.1 のスクリプトを加えたもの）。完走確認の後、main に取り込んだ 86a8929 を送り直した（遠隔機の HEAD = 86a8929、`git status --porcelain` は空）。
+
+### 4.1 送り方（scripts/sync_to_remote.sh・scripts/fetch_from_remote.sh）
+
+- `scripts/sync_to_remote.sh [--host HOST] [--src DIR] [--commit REV] [--remote-dir DIR] [--data] [--data-src DIR]`（既定: ubuntu-desktop、`~/SpeedMeter`）
+  1. git の共通ディレクトリ（`git rev-parse --git-common-dir`、元の .git）を遠隔機の `~/SpeedMeter/.git` に送る。`worktrees/`・`index`・`*.lock` は送らない
+  2. 送り元の作業ツリー（既定は実行した場所の作業ツリー。`--src` で worktree を指定できる）を、`data/`・`runs/`・`.venv/`・`listening/`・`results/error_cases/*.mp3`・`results/alignment_check/*.wav`・`__pycache__`・`.pytest_cache`・`.DS_Store` を除いて送る（`--delete` は除外した場所に及ばない）
+  3. 遠隔機で `git checkout --force --detach <送り元の HEAD>` をし、送り元が clean なら遠隔機の `git status --porcelain` が空であることを確かめる
+  4. `--data` のときだけ data/common_voice_ja・musan・processed を元のリポジトリの data/ の実体から送る（`--delete` なし）。送った後、通常ファイルの数・合計バイト数・symlink の数を Mac と遠隔機で同じ perl の数え方で比べる
+  - ssh は接続の失敗（終了コード255）だけ、rsync は失敗時に、最大4回まで再試行する
+- `scripts/fetch_from_remote.sh [--host HOST] <名前>...`: 遠隔機の `~/SpeedMeter/runs/<名前>`（ディレクトリまたはファイル）を元のリポジトリの runs/ に戻す。Mac に同じ名前があれば何も送らずに停止する（確認済み）。戻した後に数とバイト数を比べる
+- **統括が許可した例外**: 遠隔機では `git checkout --force --detach` だけを行う（コミットはしない）。0節の5「ubuntu-desktop ではコミットしない」はこれで守られる。遠隔機の HEAD は detached で、次の送り出しで上書きされる
+
+### 4.2 データの一致
+
+`--data` の送り出しは約11分（23:56〜00:07、Common Voice 約6分、processed 約4分）。
+
+| data/ | 通常ファイル数（Mac / 遠隔機） | 合計バイト数（Mac / 遠隔機） | 結果 |
+| --- | --- | --- | --- |
+| common_voice_ja | 585,341 / 585,341 | 16,002,538,336 / 16,002,538,336 | 一致 |
+| musan | 935 / 935 | 717,334,021 / 717,334,021 | 一致 |
+| processed | 557 / 557 | 22,301,841,915 / 22,301,841,915 | 一致 |
+
+symlink はどちらも0。送った後の遠隔機のディスクは使用 58G・空き 387G（.venv は 6.4G）。
+
+### 4.3 uv sync・環境・pytest
+
+- `~/.local/bin/uv sync --frozen`: 成功。pyopenjtalk 0.4.1 は sdist からビルドされ、`CMAKE_POLICY_VERSION_MINIMUM` の指定は要らなかった。Python 3.12.14（uv が管理するもの）
+- torch 2.14.0+cu130、`torch.version.cuda` = 13.0、cuDNN 92400、`torch.cuda.is_available()` = True、GPU = NVIDIA GeForce RTX 3060（capability 8.6）
+- `scripts/check_env.py`: cuda の Conv2d 順伝播 OK、TF32 の設定はすべて無効（`allow_tf32=False`、fp32 精度 `ieee`）。pyopenjtalk の読み変換 OK（初回に open_jtalk の辞書を取得した）
+- `pytest`（全件）: **730 passed、3 skipped**（31.8秒）。skip は mps が要る2件（test_cnn.py:481、test_device.py:107）と、ひらがな CTC モデルの重みが未取得の1件（test_alignment.py:293）。cuda が要る試験（`requires_cuda`）は skip されずに通った。遠隔機でアライメントを行うなら CTC モデルの重みの取得が要る
+
+### 4.4 完走確認（1エポック、device=cuda）
+
+`uv run --frozen python -m spkrate.train.train --config configs/<設定>.yaml --device cuda --experiment-id <設定>_cuda` を tmux の中で実行した（設定ファイルは作っていない）。両方とも終了コード0で完走した。log.txt に「計算機: ホスト名=xps 呼び名=ubuntu-desktop デバイス=cuda デバイス名=NVIDIA GeForce RTX 3060 torch=2.14.0+cu130 CUDA=13.0 cuDNN=92400」と「TF32 を無効にした … cuda_matmul_allow_tf32=False cudnn_allow_tf32=False」の行がある。stderr に CPU フォールバックの警告は無い。
+
+| 設定 | 計算機 | num_workers | 全体 | 学習ループ | 計算 | データ待ち | 比率 | 終端処理 | dev評価 | 実行時間（プロセス全体） | MAE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| method_b_smoke | Mac（mps） | 2 | 23.9秒 | 12.9秒 | 1.1秒 | 1.8秒 | 0.136 | 10.0秒 | 11.0秒 | 27.0秒 | 3.2764 |
+| method_b_smoke | ubuntu（cuda） | 2 | 2.5秒 | 2.4秒 | 0.8秒 | 1.6秒 | **0.672** | 0.0秒 | 0.1秒 | 6.8秒 | 3.2815 |
+| method_b_smoke | ubuntu（cuda） | 4 | 1.6秒 | 1.5秒 | 0.6秒 | 0.9秒 | 0.578 | 0.0秒 | 0.1秒 | 5.8秒 | 3.2815 |
+| method_b_smoke | ubuntu（cuda） | 8 | 1.6秒 | 1.5秒 | 0.6秒 | 0.8秒 | 0.553 | 0.0秒 | 0.1秒 | 5.9秒 | 3.2815 |
+| method_a_selection_smoke | Mac（mps） | 2 | 24.5秒 | 13.5秒 | 2.1秒 | 1.4秒 | 0.106 | 10.0秒 | 10.9秒 | 26.7秒 | 56.4619 |
+| method_a_selection_smoke | ubuntu（cuda） | 2 | 2.0秒 | 1.8秒 | 0.8秒 | 1.0秒 | **0.529** | 0.0秒 | 0.2秒 | 5.5秒 | 56.4580 |
+| method_a_selection_smoke | ubuntu（cuda） | 4 | 1.6秒 | 1.4秒 | 0.9秒 | 0.5秒 | 0.357 | 0.0秒 | 0.2秒 | 5.1秒 | 56.4580 |
+| method_a_selection_smoke | ubuntu（cuda） | 8 | 1.7秒 | 1.5秒 | 0.9秒 | 0.5秒 | 0.355 | 0.0秒 | 0.2秒 | 5.1秒 | 56.4580 |
+
+- Mac の値は runs/exp000_method_b_smoke・runs/exp000_method_a_selection_smoke の log.txt と *.time.log（2026-09-26 14:30、exp005 の開始前）。遠隔機の値は runs/<設定>_cuda[_nwN]/log.txt と runs/<設定>_cuda.stderr.log・runs/nw_trial/*.stderr.log（`/usr/bin/time -v`）
+- num_workers の比較は、データ待ちの比率が0.5以上だったので行った。configs/ の設定から num_workers だけを変えた写しを遠隔機の runs/nw_trial/ に作って使った（リポジトリには入れていない。runs/nw_trial/ ごと Mac に戻した）
+- 学習クリップ256件（31〜16バッチ）の小さな試験なので、データ待ちにはワーカーの起動の時間が多く含まれ、本番の学習の比率の目安としては粗い。Mac の「終端処理=10.0秒」は Mac でのワーカーの終了待ちで、遠隔機では0.0秒だった
+- MAE は Mac と遠隔機で小数第3位で異なる（3.2764 と 3.2815、56.4619 と 56.4580）。拡張の乱数は同じ系列で（拡張の実適用回数は同じ）、差は mps と cuda の数値計算の差と考えられる。num_workers を 2・4・8 と変えても遠隔機の MAE は同じだった（学習損失は小数第3〜4位で異なる）
+- 参考: Mac の exp005（本番、num_workers 4、バッチ64）の直近のエポックはデータ待ちの比率 0.35〜0.39 だった。cuda では計算が速くなるので、本番でも比率は Mac より上がる見込みである
+
+### 4.5 メモリ使用量（遠隔機）
+
+`free -m` と `nvidia-smi` を1秒ごとに記録した（runs/<設定>_cuda.mem.log、runs/nw_trial/*.mem.log）。実行前の used は約 2.4GiB（画面表示を含む）、available は約 10.7GiB。
+
+| 設定 | num_workers | used の最大 | available の最小 | GPU メモリの最大 | 主プロセスの最大 RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| method_b_smoke | 2 | 4,027 MiB | 9,078 MiB | 564 MiB | 1.75 GB |
+| method_b_smoke | 4 | 3,633 MiB | 9,472 MiB | 402 MiB | 1.77 GB |
+| method_b_smoke | 8 | 5,204 MiB | 7,901 MiB | 564 MiB | 1.77 GB |
+| method_a_selection_smoke | 2 | 4,040 MiB | 9,065 MiB | 1,610 MiB | 1.82 GB |
+| method_a_selection_smoke | 4 | 4,606 MiB | 8,499 MiB | 1,610 MiB | 1.83 GB |
+| method_a_selection_smoke | 8 | 5,225 MiB | 7,879 MiB | 1,610 MiB | 1.87 GB |
+
+- 1秒ごとの記録なので最大値を取り逃している可能性がある。ワーカー1つあたり概ね 0.2〜0.4GiB 増えた。小さな試験ではメモリ不足の兆しは無い
+
+### 4.6 exp006（タスク4-2）の起動で注意すること
+
+- num_workers: exp004・exp005 と同じ 4 を推奨する（比較の条件をそろえるため。num_workers を変えても指標はほぼ変わらないことは 4.4 で確かめたが、条件は変えない方がよい）。起動後の最初のエポックでデータ待ちの比率と `free` を確かめ、比率が0.5以上で available に余裕（例えば 4GiB 以上）があれば、統括の判断で増やす余地がある
+- バッチ64・全学習クリップではワーカーと主プロセスのメモリが試験より増える。最初のエポックの間に `free -m` を見て、available が 2GiB を切るようなら num_workers を減らす
+- 起動は `cd ~/SpeedMeter && tmux new-session -d -s exp006 '~/.local/bin/uv run --frozen python -m spkrate.train.train --config configs/exp006.yaml > runs/exp006.stdout.log 2> runs/exp006.stderr.log'` の形（非対話の ssh では uv が PATH に無い）。起動前に `scripts/sync_to_remote.sh` で exp/011-method-a-control のコミットを送り、遠隔機の HEAD と `git status --porcelain` が空であることを確かめる
+- 遠隔機では Mac と比べて dev評価と終端処理が大幅に短い（小さな試験で dev評価 約11秒 → 0.1〜0.2秒）
 
 ## 5. 導入したパッケージと実行した管理者操作
 
@@ -122,3 +195,4 @@ Mac 側の rsync は openrsync（protocol version 29）である。
 
 - Agent が sudo で行ったのは上の2件（`apt-get update` と `apt-get install build-essential cmake`）だけである。読み取りの確認として `sudo -n true` を実行した
 - NVIDIA ドライバの導入、再起動、システムの設定（ファイアウォール・ssh・利用者）の変更は行っていない
+- タスク3（2026-09-27）では sudo を使っていない。遠隔機に作ったのは `~/SpeedMeter`（リポジトリ・.venv・data/・runs/）と uv のキャッシュ（`~/.cache/uv`）、pyopenjtalk の辞書（.venv の中）だけである
