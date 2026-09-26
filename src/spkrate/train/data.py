@@ -37,7 +37,7 @@ docs/decisions/005-window-strategy.md 4.2節が「長さの近いものを集め
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -236,13 +236,18 @@ class FeatureClipDataset(Dataset):
         limit: int | None = None,
         max_frames: int | None = None,
         min_frames: int = 1,
+        clip_ids: Collection[str] | None = None,
     ) -> None:
+        """``clip_ids`` を与えると、その clip_id のクリップだけを使う（``data.train_clip_list``）。
+        ``limit`` はこの絞り込みの後の件数に掛かる。``None`` なら従来どおり絞らない。
+        """
         self.features_dir = Path(features_dir)
         self.normalizer = normalizer
         manifest = json.loads(
             (self.features_dir / "manifest.json").read_text(encoding="utf-8")
         )
         allowed = set(client_ids) if client_ids is not None else None
+        allowed_clips = set(clip_ids) if clip_ids is not None else None
 
         entries: list[dict[str, Any]] = []
         for shard in manifest["shards"]:
@@ -251,6 +256,8 @@ class FeatureClipDataset(Dataset):
             )
             for clip in index["clips"]:
                 if allowed is not None and clip["client_id"] not in allowed:
+                    continue
+                if allowed_clips is not None and clip["clip_id"] not in allowed_clips:
                     continue
                 n_frames = int(clip["n_frames"])
                 if n_frames < min_frames:
@@ -333,16 +340,22 @@ def select_clip_records(
     limit: int | None = None,
     min_duration_sec: float = 0.0,
     max_duration_sec: float | None = None,
+    clip_ids: Collection[str] | None = None,
 ) -> list[ClipRecord]:
     """clips.jsonl から、指定した分割に属するクリップを取り出す。
 
     ``split_path`` に ``configs/splits/test.json`` を渡すと
     ``spkrate.data.splits.load_split`` が拒否する（docs/PLAN.md 禁止事項）。
+    ``clip_ids`` を与えると、その clip_id のクリップだけを使う（``data.train_clip_list``）。
+    ``limit`` はこの絞り込みの後の件数に掛かる。``None`` なら従来どおり絞らない。
     """
     client_ids = set(load_split(split_path))
+    allowed_clips = set(clip_ids) if clip_ids is not None else None
     records: list[ClipRecord] = []
     for record in load_clip_records(clips_jsonl):
         if record.client_id not in client_ids:
+            continue
+        if allowed_clips is not None and record.clip_id not in allowed_clips:
             continue
         if record.duration_sec < min_duration_sec:
             continue
@@ -526,3 +539,29 @@ class LengthBucketBatchSampler(torch.utils.data.Sampler):
             # 塊ごとに端数が出るため、単純な割り算では数えられない。
             return len(self._batches())
         return (total + self.batch_size - 1) // self.batch_size
+
+
+def check_clip_list(
+    clip_ids: Sequence[str], clips_jsonl: str | Path, split_path: str | Path
+) -> None:
+    """学習に使う clip_id の一覧が clips.jsonl にあり、``split_path`` の話者に属すことを確かめる。
+
+    方式A（``data.source`` が ``features``・``waveform``）で ``data.train_clip_list`` を使うときの
+    学習開始前の検査（方式Bの ``spkrate.train.method_b.load_train_clips`` と同じ条件で止める）。
+    """
+    speakers = set(load_split(split_path))
+    wanted = set(clip_ids)
+    owner: dict[str, str] = {}
+    for record in load_clip_records(clips_jsonl):
+        if record.clip_id in wanted:
+            owner[record.clip_id] = record.client_id
+    missing = [c for c in clip_ids if c not in owner]
+    if missing:
+        raise ValueError(
+            f"clips.jsonl に無い clip_id が一覧にある: {len(missing)}件（例 {missing[:3]}）"
+        )
+    outside = [c for c in clip_ids if owner[c] not in speakers]
+    if outside:
+        raise ValueError(
+            f"{split_path} の話者に属さない clip_id が一覧にある: {len(outside)}件（例 {outside[:3]}）"
+        )

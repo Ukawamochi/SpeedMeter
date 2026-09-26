@@ -1,0 +1,58 @@
+# exp006（対照、方式A）の学習の完走確認用の設定（docs/directives/2026-09-26.md タスク4）。
+# 実装: src/spkrate/train/train.py / src/spkrate/train/data.py / src/spkrate/train/silence.py
+#
+# これは**本番の学習ではない**。exp004 と同じ方式A（クリップ全体、waveform 経路）・無音サンプル・
+# 拡張で、学習データと雑音だけを exp005 にそろえた構成（data.train_clip_list による無発話疑い・
+# アライメント失敗等の除外、MUSAN noise の学習用分割）が、学習開始前の検査を通り1エポックの学習と
+# 検証が最後まで通ることだけを確かめる。件数が小さいので指標に意味は無い。
+# 初期状態から学習する（resume_from は書かない）。
+#
+# 前提:
+# - data.train_clip_list（scripts/summarize_train_alignment.py の出力）があること
+#
+# 実行:
+#   PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m spkrate.train.train --config configs/exp000_method_a_selection_smoke.yaml
+
+experiment_id: exp000_method_a_selection_smoke
+seed: 20260921
+device: mps          # CLAUDE.md「学習デバイスはmps」
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: exp006（方式A・学習クリップの絞り込み・MUSAN 学習用分割）の完走確認。指標の比較には使わない
+
+data:
+  source: waveform       # 方式A（exp004 と同じ）
+  dev_source: features   # 検証は事前計算特徴量・拡張なし（exp004 と同じ）
+  features_dir: data/processed/features
+  clips_jsonl: data/processed/clips.jsonl
+  train_clip_list: data/processed/train_selection/usable_clip_ids.txt   # この一覧のクリップだけで学習する
+  train_split: configs/splits/train.json
+  dev_split: configs/splits/dev.json     # 検証は dev のみ。test.json は使わない
+  max_train_clips: 256   # 一覧で絞った後の clips.jsonl の順の先頭256件
+  max_dev_clips: 256
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+augment:
+  enabled: true      # AugmentConfig の既定値（exp004 と同じ）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json   # MUSAN noise の学習用だけ
+
+silence_samples:
+  enabled: true      # それ以外は exp004 と同じ既定値（割合0.03、3種等分、-90〜-60dBFS、長さは絞った後の学習クリップの分布）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json
+
+train:
+  epochs: 1
+  batch_size: 16
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 2
+  bucketing: true
+  bucket_pool_batches: 20
+  best_metric: mae_moras_per_sec
+  log_interval: 10
+  record_metrics_csv: false  # 完走確認なので results/metrics.csv には残さない
