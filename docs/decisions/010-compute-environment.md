@@ -14,7 +14,7 @@
 | 停止条件（nvidia-smi が動かない） | **非該当**。ドライバ 595.91.07、CUDA 13.2、RTX 3060 12GB を認識 |
 | 停止条件（ディスク空き60GB未満） | **非該当**。`/home/xps` のあるファイルシステム（/、ext4）の空きは 432GB |
 | 停止条件（rsync が無い） | **非該当**。rsync 3.4.1（protocol 32） |
-| 停止条件（導入に管理者権限が要り人間の操作が要る） | tmux と git が無く、導入には sudo（パスワード入力）が要る。tmux は nohup と setsid で代える（指示書の規定どおり）。git は2節の扱いを参照 |
+| 停止条件（導入に管理者権限が要り人間の操作が要る） | 確認時は tmux と git が無く、導入には sudo（パスワード入力）が要った。**その後、人間が git と tmux を導入した**（git 2.53.0、tmux 3.6 を ssh で確認済み）。解消 |
 | uv | 無い（`~/.local/bin`、`~/.cargo/bin` にも無い）。ユーザー権限で導入できる（タスク3） |
 | 置き場所 | `~/SpeedMeter`（= `/home/xps/SpeedMeter`、未作成）。data/・runs/ も同じファイルシステムに置く |
 | 転送速度 | 300MiB の乱数ファイルで 約 62〜67 MiB/s（3回、4.5〜4.9秒） |
@@ -61,10 +61,10 @@ compute_cap 8.6
 | 名前 | 有無 | 版・場所 |
 | --- | --- | --- |
 | python3 | 有 | Python 3.14.4（`/usr/bin/python3`）。`venv` は使えるが `ensurepip` が無い |
-| git | **無** | — |
+| git | 確認時は無 → 人間が導入 | 2.53.0（`/usr/bin/git`） |
 | rsync | 有 | 3.4.1、protocol version 32（`/usr/bin/rsync`） |
 | uv | **無** | `~/.local/bin/uv`、`~/.cargo/bin/uv` も無い |
-| tmux | **無** | — |
+| tmux | 確認時は無 → 人間が導入 | 3.6（`/usr/bin/tmux`） |
 | screen | 有 | `/usr/bin/screen` |
 | nohup / setsid | 有 | `/usr/bin/nohup`、`/usr/bin/setsid` |
 | curl | 無 | — |
@@ -78,8 +78,8 @@ Mac 側の rsync は openrsync（protocol version 29）である。
 ## 2. タスク3に影響する事項
 
 1. **uv**: 無い。curl が無いので、ユーザー権限での導入は wget で配布元の導入スクリプトを取得して行う（`~/.local/bin` に入る）。`.python-version` は 3.12、`pyproject.toml` は `requires-python >= 3.12` であり、遠隔機の python3 は 3.14 なので、uv が管理する Python 3.12 を取得させる（システムの python3 は使わない）
-2. **tmux**: 無く、導入には sudo が要る。指示書の規定どおり、学習の起動は `nohup` と `setsid` で代える（`screen` も有るが、方針は nohup と setsid とする）
-3. **git**: 無く、導入には sudo が要る。遠隔機ではコミットしない（0節の5）ので必須ではないが、`src/spkrate/eval/runner.py` の `git_commit_info` は git が無いと `commit_hash = "unknown"`、`dirty = True` を返すため、遠隔機での学習の `config_snapshot.yaml` と log.txt のコミットハッシュが記録されない。また `tests/test_runner.py::test_git_commit_info_on_this_repo`（40文字のコミットハッシュを期待する）は git が無いと失敗するため、タスク3の「pytest を全件実行する」が全件通過にならない。人間が `sudo apt install git`（必要なら `tmux` も）を行うか、Mac 側で送る前のコミットハッシュを別に記録するかを統括Agentが決める必要がある
+2. **tmux**: 確認時は無かったが、人間が導入した（tmux 3.6）。学習の起動には tmux を使える（nohup と setsid で代える必要は無くなった）
+3. **git**: 確認時は無く、導入には sudo が要った。git が無いと `src/spkrate/eval/runner.py` の `git_commit_info` が `commit_hash = "unknown"` を返し、`tests/test_runner.py::test_git_commit_info_on_this_repo` が失敗するところだったが、**人間が git を導入した**（git 2.53.0）ため解消した。リポジトリは .git を含めて送るので、遠隔機でもコミットハッシュが記録される（遠隔機ではコミットしない）
 4. **置き場所**: `~/SpeedMeter`（`/home/xps/SpeedMeter`、ext4、空き 432GB）。現時点で未作成
 5. **RAM**: OS から見える量は約 12.8GiB（1.1節）。num_workers の既定値のままでメモリが足りるかを完走確認で見る
 6. **/tmp は tmpfs（6.4GB）**: 大きな一時ファイルや uv のキャッシュを /tmp に置かない（uv の既定のキャッシュは `~/.cache/uv` で問題ない）
