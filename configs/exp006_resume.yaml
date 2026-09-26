@@ -1,0 +1,95 @@
+# exp006 の再開（ubuntu-desktop の移設による中断からの続き）。2026-09-27 00:40 に、人間の指示で
+# エポック3の途中で止めた exp006 を、runs/exp006/checkpoint_last.pt（エポック2の終わり）から続ける。
+# configs/exp006.yaml との違いは experiment_id（exp006_resume）・resume_from・notes だけ。
+# - 再開元が出力先の中にあると止まる仕様のため、出力先を runs/exp006_resume/ に分ける。
+# - エポックは3から数え、上限30は通算。バッチの並び・拡張・無音サンプルは (seed, エポック, 件) から
+#   作るので、続けて学習した場合と同じ系列になる。違うのは DataLoader のワーカーの種と、
+#   最良値・改善なしの回数を引き継がず、エポック3から測り直すこと（train.py の「チェックポイントからの再開」）。
+#
+# exp006（対照、方式A）の本番の学習（docs/directives/2026-09-26.md タスク4、
+# docs/directives/2026-09-26-rtx3060.md タスク4-2）。ubuntu-desktop（cuda）で学習する。
+# 実装: src/spkrate/train/train.py / src/spkrate/train/data.py / src/spkrate/train/silence.py /
+#       src/spkrate/data/augment.py / src/spkrate/device.py
+#
+# 実行（ubuntu-desktop の ~/SpeedMeter から）:
+#   ~/.local/bin/uv run --frozen python -m spkrate.train.train --config configs/exp006.yaml
+#
+# exp004 と同じ方式A（クリップ全体、waveform 経路）・無音サンプル・拡張で、学習データと雑音だけを
+# exp005 にそろえる。方式Bの効果をデータの変更の効果と分けて測るための対照である。
+#
+# ## exp004（configs/exp004.yaml）との差分と理由
+#
+# モデル構造（configs/model/cnn_base.yaml）・損失(mse)・学習率(1e-4)・重み減衰(0)・勾配の上限(5.0)・
+# バッチ(64)・num_workers(4)・バケッティング（true、bucket_pool_batches 20）・シード・
+# 拡張の設定（AugmentConfig 既定値）・無音サンプルの設定値（割合0.03、3種等分、-90〜-60dBFS、
+# 長さは学習クリップの分布から）・検証（configs/splits/dev.json の全件、事前計算特徴量・拡張なし）・
+# 正規化・early_stopping_patience(5)・best_metric(mae_moras_per_sec)・log_interval は exp004 と同じ。
+#
+# - device: mps → cuda（ubuntu-desktop で学習する。指示書 2026-09-26-rtx3060.md タスク4-2。
+#     float64・torch.compile・混合精度は使わず、TF32 は無効にする。src/spkrate/device.py）
+# - data.train_clip_list: 追加（data/processed/train_selection/usable_clip_ids.txt の全件。
+#     アライメント失敗・不一致・端の孤立・無発話疑いを除外。exp005 と同じ一覧。指示書0節・タスク2）
+# - data.clips_jsonl: 明記（一覧の検査と waveform 経路で使う。値は既定値と同じ）
+# - augment.musan_noise_split / silence_samples.musan_noise_split: 追加
+#     （MUSAN noise は configs/splits/musan_noise.json の学習用だけ。exp005 と同じ。指示書0節）
+# - resume_from: 削除（exp004 の重みから再開せず初期状態から学習する。exp004 は評価用の
+#     雑音ファイルも学習で見ているため。指示書タスク3・タスク4）
+# - train.max_epochs: 30 は同じ値だが、初期状態から始めるのでエポック1〜30になる（exp005 と同じ）
+# - notes と experiment_id のみ文言が異なる。
+#
+# ## exp005（configs/exp005.yaml）との差分
+#
+# 方式だけが違う: data.source windows → waveform（方式A、クリップ全体の正解）、検証は
+# dev_window_val → dev.json の全件（features、exp004 と同じ）、windows の節なし、
+# bucketing false → true（クリップ長が可変のため。exp004 と同じ）。device は mps → cuda。
+# 学習クリップの一覧・MUSAN の学習用分割・無音サンプル・拡張・学習率・エポック・早期終了・
+# バッチ・num_workers・シードは exp005 と同じ。
+#
+# test.json は使わない。検証は configs/splits/dev.json のみ。
+
+experiment_id: exp006_resume
+resume_from: runs/exp006/checkpoint_last.pt   # エポック2の終わり（中断前）
+seed: 20260921
+device: cuda         # CLAUDE.md「学習デバイスはmpsまたはcuda」。ubuntu-desktop で学習する
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: exp006 の中断（ubuntu-desktop の移設）からの再開。方式A（exp004 と同じ）・学習クリップの絞り込み・MUSAN 学習用分割・silence_samples と拡張は exp004 と同じ。初期状態から、早期終了（patience 5、上限30）。cuda（ubuntu-desktop）
+
+data:
+  source: waveform       # 方式A。拡張は波形に掛けるので波形から都度メルを計算する
+  dev_source: features   # 検証は事前計算特徴量・拡張なし（exp004 と同じ）
+  features_dir: data/processed/features
+  clips_jsonl: data/processed/clips.jsonl
+  train_clip_list: data/processed/train_selection/usable_clip_ids.txt   # この一覧のクリップだけで学習する
+  train_split: configs/splits/train.json
+  dev_split: configs/splits/dev.json     # 検証は dev のみ。test.json は使わない
+  max_train_clips: null  # 一覧で絞った後の全件
+  max_dev_clips: null    # 全29,518件で毎エポック評価する
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+augment:
+  enabled: true      # AugmentConfig の既定値（exp004 と同じ）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json   # MUSAN noise の学習用だけ
+
+silence_samples:
+  enabled: true      # それ以外は exp004 と同じ既定値（割合0.03、3種等分、-90〜-60dBFS、長さは絞った後の学習クリップの分布）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json
+
+train:
+  max_epochs: 30                  # 上限（初期状態からエポック1〜30）
+  early_stopping_patience: 5      # dev の mae_moras_per_sec が5エポック連続で改善しなければ終了
+  batch_size: 64
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 4
+  bucketing: true
+  bucket_pool_batches: 20
+  best_metric: mae_moras_per_sec
+  log_interval: 200
+  # results/metrics.csv への追記は学習後の評価で行う。
+  record_metrics_csv: false
