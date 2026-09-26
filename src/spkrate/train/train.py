@@ -192,6 +192,7 @@ from spkrate.train.data import (
     LengthBucketBatchSampler,
     Normalizer,
     WaveformClipDataset,
+    check_clip_list,
     collate_clips,
     load_normalization,
     select_clip_records,
@@ -289,8 +290,11 @@ class DataSettings:
         max_frames: これを超える長さのクリップを学習から外す（``None`` で無制限）。
         normalization: configs/normalization.yaml のパス。
         normalization_mode: ``per_mel`` か ``global``。``None`` なら yaml の既定。
-        train_clip_list: 方式B（``source=windows``）で学習に使う clip_id の一覧
+        train_clip_list: 学習に使う clip_id の一覧
             （``scripts/summarize_train_alignment.py`` の ``usable_clip_ids.txt``）。
+            方式B（``source=windows``）では必須。方式A（``features``・``waveform``）では任意で、
+            指定するとこの一覧のクリップだけで学習する（無音サンプルの長さの分布も絞った後の
+            クリップから取る）。``None`` なら従来どおり分割の全クリップを使う。
         train_alignments: 方式Bのモーラ区間（``data/processed/alignments/train.jsonl``）。
         dev_window_val_dir: ``dev_source=dev_window_val`` の検証窓の特徴量
             （``scripts/build_dev_window_val.py`` の出力）。件数の上限は ``max_dev_clips``。
@@ -845,6 +849,7 @@ def build_datasets(
         )
 
     features_dir = Path(config.data.features_dir)
+    clip_ids = _method_a_clip_ids(config) if source != "windows" else None
     if source == "features":
         from spkrate.data.splits import load_split
 
@@ -854,6 +859,7 @@ def build_datasets(
             normalizer=normalizer,
             limit=config.data.max_train_clips,
             max_frames=config.data.max_frames,
+            clip_ids=clip_ids,
         )
     elif source == "windows":
         train_dataset = _build_window_dataset(config, normalizer, log)
@@ -867,6 +873,7 @@ def build_datasets(
                 if config.data.max_frames is None
                 else config.data.max_frames / 100.0
             ),
+            clip_ids=clip_ids,
         )
         train_dataset = WaveformClipDataset(
             records,
@@ -876,6 +883,25 @@ def build_datasets(
             noise_source=_build_noise_source(config, log),
             seed=config.seed,
         )
+    if clip_ids is not None:
+        log.info(
+            "学習クリップの一覧: %s（%d件、使用%d件。件数の上限=%s 長さの上限=%s）",
+            config.data.train_clip_list,
+            len(clip_ids),
+            len(train_dataset),  # type: ignore[arg-type]
+            config.data.max_train_clips,
+            config.data.max_frames,
+        )
+        if (
+            config.data.max_train_clips is None
+            and config.data.max_frames is None
+            and len(train_dataset) < len(clip_ids)  # type: ignore[arg-type]
+        ):
+            log.warning(
+                "学習クリップの一覧のうち %d件が学習データ（経路=%s）に無い",
+                len(clip_ids) - len(train_dataset),  # type: ignore[arg-type]
+                source,
+            )
 
     if config.silence_samples.enabled:
         num_speech = len(train_dataset)  # type: ignore[arg-type]
@@ -917,6 +943,17 @@ def build_datasets(
         config.data.dev_source,
     )
     return train_dataset, dev_dataset, normalizer
+
+
+def _method_a_clip_ids(config: TrainConfig) -> list[str] | None:
+    """方式Aの ``data.train_clip_list`` を読み、検査して返す（指定が無ければ ``None``）。"""
+    if not config.data.train_clip_list:
+        return None
+    clip_ids = read_clip_list(config.data.train_clip_list)
+    if not clip_ids:
+        raise ValueError(f"data.train_clip_list が空: {config.data.train_clip_list}")
+    check_clip_list(clip_ids, config.data.clips_jsonl, config.data.train_split)
+    return clip_ids
 
 
 def _build_window_dataset(
