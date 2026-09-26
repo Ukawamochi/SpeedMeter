@@ -261,3 +261,8 @@
 - タスク2: train 236,143件にアライメントと無発話の指標を1回の推論で付けた（21,896秒、失敗0、CPUフォールバックなし）。除外は1,229件（先頭の孤立97・末尾の孤立54・無発話疑い1,078、排他）で、学習に使うのは234,914件（99.48%）。無発話疑いは0.46%（dev 1.42%）。results/train_alignment.md。
 - タスク3: docs/decisions/009-method-b.md（矛盾なし、細部の決定）を書き、feat/method-b に方式Bを実装した（pytest 692件、途中の一覧でスモーク完走）。exp006 用に方式Aでも学習用の一覧で絞れるようにした（feat/method-a-selection、pytest 705件）。
 - タスク1後半: 方式Bの窓と正解の定義を spec.md に加えた（b9c3bd2）。正式な一覧でのスモークとマージはこの後に行う。
+
+### 2026-09-26 測定: 指示書 2026-09-26-rtx3060 タスク1
+- ubuntu-desktop（xps）: Ubuntu 26.04.1、i7-13700（16コア24スレッド）、RAM は OS から約12.8GiB（指示書の16GBより少ない）、`/`（ext4）の空き432GB。RTX 3060 12GB、ドライバ 595.91.07、CUDA 13.2。
+- python3 3.14.4、rsync 3.4.1 は有。uv・tmux・git は無（tmux・git の導入は sudo のパスワードが要る）。転送は300MiBで約62〜67MiB/s。
+- 停止条件（nvidia-smi・ディスク・rsync）は非該当。git が無いとコミットハッシュが unknown になり test_git_commit_info_on_this_repo が失敗する点を記録した。docs/decisions/010-compute-environment.md（c60792c）。
