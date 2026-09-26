@@ -1,0 +1,17 @@
+# 方式Bの学習の検証（エポックごとの検証と早期終了）に使う dev_window の抽出窓
+# （docs/directives/2026-09-26.md タスク3、docs/decisions/009-method-b.md 1.7節）。
+# 実装: src/spkrate/eval/dev_window_val.py、入口: scripts/build_dev_window_val.py
+#
+# - 母集団: dev_window_config の output_dir（data/processed/dev_window/）の窓のうち、主指標の除外
+#   （known_no_speech: dev_window_config の known_no_speech_list、no_speech_suspect: suspect_list）の
+#   クリップを由来に持たない窓。scripts/eval_dev_window.py の主指標と同じ（827,467窓）
+# - 抽出: numpy.random.default_rng(seed).choice(主指標の窓の番号, num_windows, replace=False) を昇順に。
+#   単一と連結で層に分けない。種は既存の種（20260921・20260924・20260925・20260927）と重ならない値
+# - 特徴量: clean の窓の対数メル（正規化前）を float16 で output_dir に一度だけ保存する（Git管理外）
+# configs/splits/test.json は使わない。
+seed: 20260928
+num_windows: 50000
+# 相対パスはリポジトリ直下から解決する
+dev_window_config: configs/eval/dev_window.yaml
+suspect_list: results/no_speech_suspect_dev.tsv
+output_dir: data/processed/dev_window_val
