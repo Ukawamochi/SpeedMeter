@@ -7,7 +7,7 @@
 
 | 実験ID | 計算機 | デバイス | 状態 | 開始 | 終了 | 備考 |
 | --- | --- | --- | --- | --- | --- | --- |
-| exp005 | mac | mps | 実行中 | 2026-09-26 14:34 | — | configs/exp005.yaml（方式B） |
+| exp005 | mac | mps | 完了 | 2026-09-26 14:34 | 2026-09-27 02:31 | configs/exp005.yaml（方式B）。上限30エポックで終了、最良はエポック26（検証 MAE 0.4737） |
 | exp000_method_b_smoke_cuda | ubuntu-desktop | cuda | 完了 | 2026-09-27 00:08 | 2026-09-27 00:08 | 完走確認（1エポック）。010 の4.4節 |
 | exp000_method_a_selection_smoke_cuda | ubuntu-desktop | cuda | 完了 | 2026-09-27 00:08 | 2026-09-27 00:08 | 完走確認（1エポック）。010 の4.4節 |
 | exp006 | ubuntu-desktop | cuda | 中断 | 2026-09-27 00:16 | 2026-09-27 00:40 | configs/exp006.yaml（方式Aの対照）。exp/011-method-a-control の f70044e。計算機の移設のため、エポック3の途中で Ctrl-C で止めた。checkpoint_last.pt はエポック2の終わり（00:39:52）で、そこから再開する |
