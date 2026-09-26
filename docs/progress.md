@@ -266,3 +266,6 @@
 - ubuntu-desktop（xps）: Ubuntu 26.04.1、i7-13700（16コア24スレッド）、RAM は OS から約12.8GiB（指示書の16GBより少ない）、`/`（ext4）の空き432GB。RTX 3060 12GB、ドライバ 595.91.07、CUDA 13.2。
 - python3 3.14.4、rsync 3.4.1 は有。uv・tmux・git は無（tmux・git の導入は sudo のパスワードが要る）。転送は300MiBで約62〜67MiB/s。
 - 停止条件（nvidia-smi・ディスク・rsync）は非該当。git が無いとコミットハッシュが unknown になり test_git_commit_info_on_this_repo が失敗する点を記録した。docs/decisions/010-compute-environment.md（c60792c）。
+
+### 2026-09-26 統括: 指示書 2026-09-26-rtx3060 タスク1の後（人間の作業待ちで停止）
+- ubuntu-desktop に git と tmux が無く、導入に sudo が要る。人間が `sudo apt install git tmux` を行うと決まった。導入が済むまで停止する（questions.md に記録）。exp005 は Mac で学習を続けている。
