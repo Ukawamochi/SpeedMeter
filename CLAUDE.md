@@ -16,9 +16,18 @@
 - data/以下のデータセット本体・アーカイブ（バックアップ含む）は、このCLAUDE.mdに削除の指示がある場合を除き、ユーザーの明示的な指示なしに削除しない
 
 ## 実行環境
-- 学習デバイスはmps。float64は使わない
-- torch.compileは使わない
+- 計算機は2台。mac（作業の本拠地、デバイスはmps）とubuntu-desktop（Macから`ssh ubuntu-desktop`で接続する。RTX 3060、デバイスはcuda）
+- 学習デバイスはmpsまたはcuda。指定したデバイスが使えない場合は開始前に停止し、cpuに落とさない
+- float64は使わない。torch.compileは使わない。混合精度（float16・bfloat16での学習）は使わない
+- cudaではTF32を無効にする（torch.backends.cuda.matmul.allow_tf32とtorch.backends.cudnn.allow_tf32をFalse）。mpsのfloat32と精度の条件をそろえるため
 - MPS未対応演算でCPUフォールバックが起きたら発生箇所をログに記録して報告する
+- ubuntu-desktopでは学習と推論の実行だけを行う。git、docs、results、metrics.csvの正本はMacのリポジトリだけに置く
+- metrics.csv、progress.md、questions.md、docs/への書き込みとgitの操作（コミット）はMac上の統括Agentだけが行う。ubuntu-desktopではコミットしない。例外として、scripts/sync_to_remote.shが遠隔機で行う`git checkout --force --detach`だけを許す
+- ubuntu-desktopへの送り出しはscripts/sync_to_remote.sh、runs/の結果の取り戻しはscripts/fetch_from_remote.shで行う。どちらの計算機で評価しても、結果はMacのresults/とmetrics.csvに書く
+- 推論時間の測定はMacだけで行う（これまでの値と比べるため）
+- 互いに依存しない学習は2台で同時に実行してよい。1台で同時に実行する学習は1つまで
+- 評価（推論）は学習中でない計算機で実行してよい
+- 実験ごとの計算機と状態はdocs/compute.mdで管理する
 
 ## gitの運用
 - mainには動作確認済みの状態のみ置く

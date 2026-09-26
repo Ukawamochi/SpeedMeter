@@ -157,3 +157,8 @@ pyopenjtalkの実測に関する注記
 
 1. 連結の無音長の範囲の書き方が資料で異なる（configs/eval/dev_window.yaml のコメントは「両端を含む」、results/dev_window_build.md と実装の docstring は [0.3, 1.5)）。値は同じで、0.01秒に丸めるため実質の差はない。spec.md には「0.3〜1.5秒の一様乱数（Generator.uniform(0.3, 1.5)）」と書いた
 2. 補助の条件（偏りの絶対値0.25以下、正解0の窓の出力0.5モーラ以下）を clean・主指標で判定するかが指示に明記されていない。補助の条件は採否の根拠にしないため、タスク4では clean と雑音下の両方の値を記録する
+
+### 2026-09-26 ubuntu-desktop に git と tmux が無い（指示書 2026-09-26-rtx3060 タスク1、人間の作業待ちで停止）
+
+1. ubuntu-desktop（ホスト名 xps）には git と tmux が無く、sudo は非対話では使えない。git が無いと、遠隔機での学習の config_snapshot.yaml と log.txt にコミットハッシュが残らず、tests/test_runner.py::test_git_commit_info_on_this_repo が失敗する。人間の回答（2026-09-26）: 人間が `sudo apt install git tmux` を実行する。導入が済むまでタスク2以降に進まない
+2. OS から見える RAM は約12.8GiB（MemTotal 13,420,216 kB）で、指示書の16GBより少ない。1台で同時に実行する学習は1つまでという方針は変えず、完走確認で num_workers とメモリ使用量を確認する（停止の理由ではない）

@@ -1,0 +1,85 @@
+# 方式B（窓単位の正解）の本番の学習（docs/directives/2026-09-26.md タスク3・タスク4の exp005、
+# docs/decisions/009-method-b.md）。
+# 実装: src/spkrate/train/method_b.py / src/spkrate/eval/dev_window_val.py / src/spkrate/train/train.py /
+#       src/spkrate/train/silence.py / src/spkrate/data/augment.py
+#
+# 実行（リポジトリ直下から）:
+#   PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m spkrate.train.train --config configs/exp005.yaml
+#
+# ## exp004（configs/exp004.yaml）との差分と理由
+#
+# モデル構造（configs/model/cnn_base.yaml）・損失(mse)・学習率(1e-4)・重み減衰(0)・勾配の上限(5.0)・
+# バッチ(64)・num_workers(4)・シード・拡張の設定（AugmentConfig 既定値）・無音サンプルの設定値
+# （割合0.03、3種等分、-90〜-60dBFS、duration_range_sec は既定の null）・正規化・
+# early_stopping_patience(5)・best_metric(mae_moras_per_sec)・log_interval は exp004 と同じ。
+#
+# - data.source: waveform → windows（方式B。2.0秒窓・dev_window と同じ按分の正解、単一と連結を
+#     1対1、時間伸縮はモーラ時刻を変換。指示書タスク3、009 1.1〜1.4節）。
+#     windows の設定は configs/eval/dev_window.yaml と同じ値（009 1.3節）
+# - data.dev_source: features → dev_window_val（検証は dev_window の clean・主指標から
+#     種 20260928 で抽出した50,000窓の全件。指示書タスク3、009 1.7節）。dev_split は使わない
+# - data.train_clip_list: 追加（data/processed/train_selection/usable_clip_ids.txt の全件、
+#     234,914件。アライメント失敗・不一致・端の孤立・無発話疑いを除外。指示書0節・タスク2）
+# - data.train_alignments / clips_jsonl: 追加（方式Bの正解のモーラ区間）
+# - augment.musan_noise_split / silence_samples.musan_noise_split: 追加
+#     （MUSAN noise は configs/splits/musan_noise.json の学習用だけ。指示書0節）
+# - resume_from: 削除（exp004 の重みから再開せず初期状態から学習する。exp004 は評価用の
+#     雑音ファイルも学習で見ているため。指示書タスク3）
+# - train.max_epochs: 30 は同じ値だが、初期状態から始めるのでエポック1〜30になる
+#     （exp004 は exp002 のエポック6からの通算。009 1.6節）
+# - train.bucketing: true → false（全件201フレームで長さの整列は意味がない。009 1.6節）
+# - notes と experiment_id のみ文言が異なる。
+#
+# test.json は使わない。
+
+experiment_id: exp005
+seed: 20260921
+device: mps          # CLAUDE.md「学習デバイスはmps」
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: 方式B（2.0秒窓・按分の正解、単一と連結1対1）・学習クリップの絞り込み・MUSAN 学習用分割・silence_samples と拡張は exp004 と同じ。初期状態から、早期終了（patience 5、上限30）
+
+data:
+  source: windows                 # 方式B（spkrate.train.method_b）
+  dev_source: dev_window_val      # 検証は dev_window の抽出50,000窓（事前計算特徴量・拡張なし）
+  dev_window_val_dir: data/processed/dev_window_val
+  train_clip_list: data/processed/train_selection/usable_clip_ids.txt
+  train_alignments: data/processed/alignments/train.jsonl
+  clips_jsonl: data/processed/clips.jsonl
+  train_split: configs/splits/train.json   # test.json は使わない
+  max_train_clips: null  # 学習用の一覧の全件
+  max_dev_clips: null    # 検証窓の50,000窓全件で毎エポック評価する
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+windows:
+  window_sec: 2.0
+  margin_sec: 0.5
+  concat_group_size: [3, 5]      # configs/eval/dev_window.yaml と同じ
+  concat_gap_sec: [0.3, 1.5]
+  concat_gap_round_sec: 0.01
+
+augment:
+  enabled: true      # AugmentConfig の既定値（exp004 と同じ）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json   # MUSAN noise の学習用だけ
+
+silence_samples:
+  enabled: true      # それ以外は exp004 と同じ既定値（割合0.03、3種等分、-90〜-60dBFS、長さは学習入力＝2.0秒）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json
+
+train:
+  max_epochs: 30                  # 上限（初期状態からエポック1〜30）
+  early_stopping_patience: 5      # 検証の mae_moras_per_sec が5エポック連続で改善しなければ終了
+  batch_size: 64
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 4
+  bucketing: false   # 全件201フレームなので長さの整列はしない
+  best_metric: mae_moras_per_sec
+  log_interval: 200
+  # results/metrics.csv への追記は学習後の評価で行う。
+  record_metrics_csv: false

@@ -261,3 +261,39 @@
 - タスク2: train 236,143件にアライメントと無発話の指標を1回の推論で付けた（21,896秒、失敗0、CPUフォールバックなし）。除外は1,229件（先頭の孤立97・末尾の孤立54・無発話疑い1,078、排他）で、学習に使うのは234,914件（99.48%）。無発話疑いは0.46%（dev 1.42%）。results/train_alignment.md。
 - タスク3: docs/decisions/009-method-b.md（矛盾なし、細部の決定）を書き、feat/method-b に方式Bを実装した（pytest 692件、途中の一覧でスモーク完走）。exp006 用に方式Aでも学習用の一覧で絞れるようにした（feat/method-a-selection、pytest 705件）。
 - タスク1後半: 方式Bの窓と正解の定義を spec.md に加えた（b9c3bd2）。正式な一覧でのスモークとマージはこの後に行う。
+
+### 2026-09-26 測定: 指示書 2026-09-26-rtx3060 タスク1
+- ubuntu-desktop（xps）: Ubuntu 26.04.1、i7-13700（16コア24スレッド）、RAM は OS から約12.8GiB（指示書の16GBより少ない）、`/`（ext4）の空き432GB。RTX 3060 12GB、ドライバ 595.91.07、CUDA 13.2。
+- python3 3.14.4、rsync 3.4.1 は有。uv・tmux・git は無（tmux・git の導入は sudo のパスワードが要る）。転送は300MiBで約62〜67MiB/s。
+- 停止条件（nvidia-smi・ディスク・rsync）は非該当。git が無いとコミットハッシュが unknown になり test_git_commit_info_on_this_repo が失敗する点を記録した。docs/decisions/010-compute-environment.md（c60792c）。
+
+### 2026-09-26 統括: 指示書 2026-09-26-rtx3060 タスク1の後（git・tmux の導入待ちで一時停止、導入後に再開）
+- ubuntu-desktop に git と tmux が無く、導入に sudo が要る。人間が `sudo apt install git tmux` を行うと決まった。導入が済むまで停止する（questions.md に記録）。exp005 は Mac で学習を続けている。
+- 追記: 人間が ubuntu-desktop に git（2.53.0）と tmux（3.6）を導入したことを ssh で確認し、010-compute-environment.md に反映した。
+- 改訂版タスク1（0aed609）: sudo -n 成功、Secure Boot 有効（ドライバは動作済みで導入不要）。uv 0.12.19 をユーザー権限で、pyopenjtalk のビルド用に build-essential と cmake 4.2.3 を sudo apt で導入し、操作の一覧を 010 の5節に記録した。
+
+### 2026-09-26 実装: 指示書 2026-09-26-rtx3060 タスク2（cuda への対応）
+- worktree（feat/cuda-device）で実装し main にマージした（f7d147e）。spkrate.device で mps・cuda・cpu を指定でき、使えないデバイスは開始前に停止する。cuda では TF32 を無効にし、pin_memory を有効にする。
+- 依存: Linux は cu130 の torch 2.14.0+cu130・torchaudio 2.11.0+cu130。macOS で解決される80件の版は変わらない（uv export で比較）。
+- log.txt と config_snapshot.yaml に、ホスト名・GPU名・torch/CUDA の版を記録する。metrics.csv の末尾に host（呼び名 mac/ubuntu-desktop、Public のため生のホスト名は書かない）と device の列を足した（既存29行は空欄）。
+- pytest（Mac）730 passed / 3 skipped（cuda が要る試験）。exp005 の作業ツリーは変えていない。exp005 の評価の追記は main を取り込んでから行う。
+
+### 2026-09-27 測定: 指示書 2026-09-26-rtx3060 タスク3（ubuntu-desktop の環境構築と試験）
+- scripts/sync_to_remote.sh・fetch_from_remote.sh を作り main にマージした（86a8929）。.git・作業ツリー・data（common_voice_ja・musan・processed）を送り、ファイル数とバイト数は3件とも一致した。
+- 遠隔機で uv sync --frozen 成功（torch 2.14.0+cu130、RTX 3060 を認識、TF32 無効）。pytest 730 passed / 3 skipped（mps 2件・CTC 重み未取得1件。cuda の試験は通った）。
+- 完走確認2件は cuda で完走した。1エポックは Mac の約24秒に対し約2秒。データ待ちの比率は 0.53〜0.67（num_workers 4 で 0.36〜0.58）。メモリの used は最大約5.2GiB。結果は 010 の4節、出力は runs/*_cuda* に戻した。
+
+### 2026-09-27 実装: 指示書 2026-09-26-rtx3060 タスク4-1（文書の更新）
+- CLAUDE.md の実行環境を2台（mac=mps、ubuntu-desktop=cuda）、精度の条件（float64・torch.compile・混合精度なし、cuda は TF32 無効）、正本と git の操作は Mac だけ（遠隔機は sync_to_remote.sh の checkout だけ例外）、推論時間は Mac、並列の方針に書き改めた。
+- README.md の現在の実装を main の src/ に合わせて書き直し、開発環境に2台の構成・ubuntu-desktop の環境構築・sync/fetch スクリプトの使い方を書いた（呼び名だけを使い、ホスト名・IP は書かない）。
+- docs/compute.md を新設（exp005 mac 実行中 2026-09-26 14:34 開始、cuda の完走確認2件）。data/DATASETS.md に遠隔機の配置と --data での送り方を追記した。exp/010-method-b に文書だけをコミットした。
+
+### 2026-09-27 測定: 指示書 2026-09-26-rtx3060 タスク4-2（exp006 の起動）
+- configs/exp006.yaml（exp/011-method-a-control の f70044e。exp005 との違いは方式A・全件の dev 検証・bucketing・device=cuda）を作り、ubuntu-desktop の tmux で 2026-09-27 00:16 に起動した。
+- エポック1: 検証 MAE 0.9510、685秒（データ待ちの比率 0.351）。CUDA allocator の OOM 警告が3回出たが、例外にはならず学習は続いている。RAM の available は最小約6GiB。
+
+### 2026-09-27 統括: exp006 の中断（ubuntu-desktop の移設）
+- 人間の指示で一時中断した。ubuntu-desktop を隣の部屋に移すため、exp006 をエポック3の途中（00:40）で Ctrl-C で止めた。checkpoint_last.pt はエポック2の終わり（検証 MAE 0.7863）で、移設の後に resume_from で再開する。exp005（Mac）は続けている。
+
+### 2026-09-27 統括: exp006 の再開
+- ubuntu-desktop の移設後、configs/exp006_resume.yaml（35b8773。experiment_id と resume_from だけが違う）で、2026-09-27 00:50 にエポック3から再開した。出力は runs/exp006_resume/。バッチの並び・拡張の系列は続けた場合と同じで、違うのはワーカーの種と最良値の測り直し（010-method-b.md の留保に書く）。
