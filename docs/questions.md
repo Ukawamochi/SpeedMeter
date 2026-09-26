@@ -162,3 +162,8 @@ pyopenjtalkの実測に関する注記
 
 1. ubuntu-desktop（ホスト名 xps）には git と tmux が無く、sudo は非対話では使えない。git が無いと、遠隔機での学習の config_snapshot.yaml と log.txt にコミットハッシュが残らず、tests/test_runner.py::test_git_commit_info_on_this_repo が失敗する。人間の回答（2026-09-26）: 人間が `sudo apt install git tmux` を実行する。導入が済むまでタスク2以降に進まない
 2. OS から見える RAM は約12.8GiB（MemTotal 13,420,216 kB）で、指示書の16GBより少ない。1台で同時に実行する学習は1つまでという方針は変えず、完走確認で num_workers とメモリ使用量を確認する（停止の理由ではない）
+
+### 2026-09-27 タスク4の評価で生じた確認事項（指示書 2026-09-26、作業は止めていない）
+
+1. 方式Bのモデル（exp005）のクリップ単位の値（dev・dev_noisy）の出し方は、spec.md にも 009-method-b.md にも別の定めが無い。そこで、spec.md「評価指標」と scripts/eval_dev_full.py の既存の手順（クリップ全体を1回で入力し、出力の総和をクリップ長で割る）をそのまま当てはめた。学習時の入力（2.0秒窓）とは長さが違う。この読み方でよいか、承認のときに確認してほしい（results/exp005_eval.md の0節・10節）
+2. D1 の雑音下（補助）は、scripts/window_diagnostics.py（9241a8c）の定義で測った。D1 と同じ1,000件のクリップに dev_noisy と同じ加工を掛けて測る。spec.md にはまだこの定義が無い
