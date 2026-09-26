@@ -285,3 +285,23 @@ def test_training_records_host_and_device(tmp_path: Path) -> None:
     assert host["device_name"]
     assert host["torch"] == str(torch.__version__)
     assert "cuda" in host and "cuda" in snapshot["environment"]
+
+
+@requires_cuda
+def test_training_loader_pins_batches_on_cuda() -> None:
+    from spkrate.train.data import ClipItem, collate_clips
+    from spkrate.train.train import TrainSettings, _make_loader
+
+    items = [
+        ClipItem(features=torch.randn(10 + i, 80).numpy(), mora=float(i), duration_sec=1.0,
+                 clip_id=f"c{i}")
+        for i in range(4)
+    ]
+    loader = _make_loader(
+        items, batch_size=2, shuffle=False, settings=TrainSettings(num_workers=0, bucketing=False),
+        seed=0, device=torch.device("cuda"),
+    )
+    batch = next(iter(loader))
+    assert batch.features.is_pinned() and batch.moras.is_pinned()
+    assert batch.clip_ids == ("c0", "c1")
+    assert collate_clips(items[:2]).features.is_pinned() is False
