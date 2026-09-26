@@ -294,3 +294,6 @@
 
 ### 2026-09-27 統括: exp006 の中断（ubuntu-desktop の移設）
 - 人間の指示で一時中断した。ubuntu-desktop を隣の部屋に移すため、exp006 をエポック3の途中（00:40）で Ctrl-C で止めた。checkpoint_last.pt はエポック2の終わり（検証 MAE 0.7863）で、移設の後に resume_from で再開する。exp005（Mac）は続けている。
+
+### 2026-09-27 統括: exp006 の再開
+- ubuntu-desktop の移設後、configs/exp006_resume.yaml（35b8773。experiment_id と resume_from だけが違う）で、2026-09-27 00:50 にエポック3から再開した。出力は runs/exp006_resume/。バッチの並び・拡張の系列は続けた場合と同じで、違うのはワーカーの種と最良値の測り直し（010-method-b.md の留保に書く）。
