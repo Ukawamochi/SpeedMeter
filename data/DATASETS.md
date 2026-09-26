@@ -10,6 +10,12 @@
 | MUSAN | data/musan/ | noise/ 以下の雑音 |
 | Common Voice 日本語 | data/common_voice_ja/ | 日本語の音声・書き起こし |
 
+## ubuntu-desktop 側の配置
+
+ubuntu-desktop（学習と推論を実行する遠隔機）でも、リポジトリ `~/SpeedMeter` の下に Mac と同じ相対パスで置く（例: `~/SpeedMeter/data/common_voice_ja/`）。
+遠隔機へは Mac から `scripts/sync_to_remote.sh --data` で送る。送るのは data/common_voice_ja・data/musan・data/processed で、`--delete` は使わない。送った後、スクリプトが通常ファイルの数と合計バイト数を Mac と遠隔機で比べて表示する。
+正本は Mac の data/ であり、遠隔機のデータを直接取得・変更しない。2026-09-27 の送り出しでは3件とも一致した（docs/decisions/010-compute-environment.md 4.2節）。
+
 ## 確認済みの取得記録
 
 以下は過去の確認完了時点の記録。以後の手動配置の進捗は反映していない。
