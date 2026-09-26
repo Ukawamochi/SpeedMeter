@@ -270,3 +270,4 @@
 ### 2026-09-26 統括: 指示書 2026-09-26-rtx3060 タスク1の後（人間の作業待ちで停止）
 - ubuntu-desktop に git と tmux が無く、導入に sudo が要る。人間が `sudo apt install git tmux` を行うと決まった。導入が済むまで停止する（questions.md に記録）。exp005 は Mac で学習を続けている。
 - 追記: 人間が ubuntu-desktop に git（2.53.0）と tmux（3.6）を導入したことを ssh で確認し、010-compute-environment.md に反映した。
+- 改訂版タスク1（0aed609）: sudo -n 成功、Secure Boot 有効（ドライバは動作済みで導入不要）。uv 0.12.19 をユーザー権限で、pyopenjtalk のビルド用に build-essential と cmake 4.2.3 を sudo apt で導入し、操作の一覧を 010 の5節に記録した。
