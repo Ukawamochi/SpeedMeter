@@ -96,10 +96,10 @@ done
 mismatch=0
 for name in "${NAMES[@]}"; do
   if rssh_r "test -d '$REMOTE_DIR/runs/$name'"; then
-    log "$name（ディレクトリ）を戻す"
+    log "${name}（ディレクトリ）を戻す"
     retry rsync -a --partial "$HOST:$REMOTE_DIR/runs/$name/" "$DEST/$name/"
   else
-    log "$name（ファイル）を戻す"
+    log "${name}（ファイル）を戻す"
     retry rsync -a --partial "$HOST:$REMOTE_DIR/runs/$name" "$DEST/$name"
   fi
   local_count="$(perl -e "$COUNT_PL" "$DEST/$name")"

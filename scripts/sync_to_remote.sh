@@ -105,7 +105,7 @@ fi
 SRC_DIRTY="$(git -C "$SRC" status --porcelain)"
 
 log "接続先=$HOST 置き場所=~/$REMOTE_DIR"
-log "送り元の作業ツリー=$SRC（HEAD=$SRC_HEAD）"
+log "送り元の作業ツリー=${SRC}（HEAD=${SRC_HEAD}）"
 log "git の共通ディレクトリ=$COMMON_DIR"
 log "遠隔機で checkout するコミット=$COMMIT"
 if [[ -n "$SRC_DIRTY" ]]; then
@@ -164,11 +164,11 @@ if ((WITH_DATA)); then
     DATA_SRC="$MAIN_REPO/data"
   fi
   DATA_SRC="$(cd "$DATA_SRC" && pwd -P)"
-  log "4. データを送る（送り元=$DATA_SRC、--delete は使わない）"
+  log "4. データを送る（送り元=${DATA_SRC}、--delete は使わない）"
   mismatch=0
   for d in "${DATA_DIRS[@]}"; do
     real="$(cd "$DATA_SRC/$d" && pwd -P)"   # symlink を辿った実体
-    log "  $d（実体=$real）を送る"
+    log "  ${d}（実体=${real}）を送る"
     retry rsync -a --partial "$real/" "$HOST:$REMOTE_DIR/data/$d/"
   done
   log "  ファイル数と合計バイト数を比べる（通常ファイル数 バイト数 symlink数）"
