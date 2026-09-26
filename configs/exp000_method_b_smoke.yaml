@@ -1,0 +1,65 @@
+# 方式B（窓単位の正解）の学習の完走確認用の設定（docs/directives/2026-09-26.md タスク3、
+# docs/decisions/009-method-b.md 1.8節）。
+# 実装: src/spkrate/train/method_b.py / src/spkrate/eval/dev_window_val.py / src/spkrate/train/train.py
+#
+# これは**本番の学習ではない**。方式Bの学習データ（単一と連結の2.0秒窓、時刻を変換する時間伸縮、
+# 残りの拡張、無音サンプル）と検証窓（dev_window の抽出50,000窓の先頭256件）で、学習開始前の検査を
+# 通り1エポックの学習と検証が最後まで通ることだけを確かめる。件数が小さいので指標に意味は無い。
+#
+# 前提:
+# - data.train_clip_list と data.train_alignments（scripts/align_train.py と
+#   scripts/summarize_train_alignment.py の出力）があること
+# - data.dev_window_val_dir（scripts/build_dev_window_val.py の出力）があること
+#
+# 実行:
+#   PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m spkrate.train.train --config configs/exp000_method_b_smoke.yaml
+
+experiment_id: exp000_method_b_smoke
+seed: 20260921
+device: mps          # CLAUDE.md「学習デバイスはmps」
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: 方式Bの完走確認。指標の比較には使わない
+
+data:
+  source: windows                 # 方式B（spkrate.train.method_b）
+  dev_source: dev_window_val      # 検証は dev_window の抽出窓（事前計算特徴量・拡張なし）
+  dev_window_val_dir: data/processed/dev_window_val
+  train_clip_list: data/processed/train_selection/usable_clip_ids.txt
+  train_alignments: data/processed/alignments/train.jsonl
+  clips_jsonl: data/processed/clips.jsonl
+  train_split: configs/splits/train.json   # test.json は使わない
+  max_train_clips: 256   # 一覧を (client_id, clip_id) 順に並べた先頭256件（単一と連結の組もこの中から作る）
+  max_dev_clips: 256     # 検証窓の先頭256件
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+windows:
+  window_sec: 2.0
+  margin_sec: 0.5
+  concat_group_size: [3, 5]      # configs/eval/dev_window.yaml と同じ
+  concat_gap_sec: [0.3, 1.5]
+  concat_gap_round_sec: 0.01
+
+augment:
+  enabled: true      # AugmentConfig の既定値（exp004 と同じ）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json   # MUSAN noise の学習用だけ
+
+silence_samples:
+  enabled: true      # それ以外は exp004 と同じ既定値（割合0.03、3種等分、-90〜-60dBFS、長さは学習入力＝2.0秒）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json
+
+train:
+  epochs: 1
+  batch_size: 16
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 2
+  bucketing: false   # 全件201フレームなので長さの整列はしない
+  best_metric: mae_moras_per_sec
+  log_interval: 10
+  record_metrics_csv: false  # 完走確認なので results/metrics.csv には残さない
