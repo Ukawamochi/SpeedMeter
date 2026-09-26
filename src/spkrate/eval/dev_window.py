@@ -343,15 +343,19 @@ def source_moras(
 def build_concat_groups(
     clips_by_speaker: Mapping[str, Sequence[str]],
     *,
-    seed: int,
+    seed: int | Sequence[int],
     spec: ConcatSpec,
     sample_rate: int,
 ) -> tuple[list[tuple[str, tuple[str, ...], tuple[int, ...]]], dict[str, int]]:
     """同一話者のクリップから連結の組を作る。
 
+    ``seed`` は整数か整数の列。整数なら乱数生成器の種は ``[seed, clip_key(client_id)]``、
+    列なら ``[*seed, clip_key(client_id)]`` である（方式Bの学習でエポックごとに組を作り直す
+    ための拡張。docs/decisions/009-method-b.md 1.3節）。整数を渡したときの結果は拡張前と同じ。
+
     方法（話者ごとに独立。話者の並び順や他の話者の件数に依存しない）:
 
-    1. 話者の使えるクリップを clip_id 順に並べ、``default_rng([seed, clip_key(client_id)])`` の
+    1. 話者の使えるクリップを clip_id 順に並べ、``default_rng([*seed, clip_key(client_id)])`` の
        ``permutation`` で並べ替える
     2. 残りが ``group_size`` の下限以上のあいだ、件数 k を下限〜上限の整数一様乱数で引き
        （残りより多ければ残り全部）、先頭から k 件を1組にする。続けて k − 1 個の無音長を
@@ -363,6 +367,7 @@ def build_concat_groups(
         (組の列 [(client_id, clip_ids, gap_samples)], 集計)
     """
     low, high = spec.group_size
+    seed_prefix = [int(seed)] if isinstance(seed, (int, np.integer)) else [int(v) for v in seed]
     groups: list[tuple[str, tuple[str, ...], tuple[int, ...]]] = []
     stats = Counter()
     for client_id in sorted(clips_by_speaker):
@@ -371,7 +376,7 @@ def build_concat_groups(
             stats["speakers_too_few_clips"] += 1
             stats["clips_unused_too_few"] += len(clip_ids)
             continue
-        rng = np.random.default_rng([int(seed), clip_key(client_id)])
+        rng = np.random.default_rng([*seed_prefix, clip_key(client_id)])
         order = [clip_ids[i] for i in rng.permutation(len(clip_ids))]
         position = 0
         while len(order) - position >= low:

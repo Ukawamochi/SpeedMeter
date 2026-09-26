@@ -196,6 +196,13 @@ from spkrate.train.data import (
     load_normalization,
     select_clip_records,
 )
+from spkrate.train.method_b import (
+    WindowEpochStats,
+    WindowSettings,
+    WindowTrainDataset,
+    load_train_clips,
+    read_clip_list,
+)
 from spkrate.train.silence import (
     SilenceSettings,
     SilenceSetupError,
@@ -230,6 +237,9 @@ __all__ = [
 ]
 
 LOSSES: tuple[str, ...] = ("mse", "poisson")
+# 学習データの経路（windows は方式B。spkrate.train.method_b）と検証データの経路。
+TRAIN_SOURCES: tuple[str, ...] = ("features", "waveform", "windows")
+DEV_SOURCES: tuple[str, ...] = ("features", "dev_window_val")
 
 # ポアソン損失の log(λ) を守る下駄。docstring「ポアソン損失の実装と数値安定性」を参照。
 POISSON_EPS = 1e-8
@@ -279,6 +289,11 @@ class DataSettings:
         max_frames: これを超える長さのクリップを学習から外す（``None`` で無制限）。
         normalization: configs/normalization.yaml のパス。
         normalization_mode: ``per_mel`` か ``global``。``None`` なら yaml の既定。
+        train_clip_list: 方式B（``source=windows``）で学習に使う clip_id の一覧
+            （``scripts/summarize_train_alignment.py`` の ``usable_clip_ids.txt``）。
+        train_alignments: 方式Bのモーラ区間（``data/processed/alignments/train.jsonl``）。
+        dev_window_val_dir: ``dev_source=dev_window_val`` の検証窓の特徴量
+            （``scripts/build_dev_window_val.py`` の出力）。件数の上限は ``max_dev_clips``。
     """
 
     source: str | None = None
@@ -293,6 +308,9 @@ class DataSettings:
     max_frames: int | None = None
     normalization: str = "configs/normalization.yaml"
     normalization_mode: str | None = None
+    train_clip_list: str | None = None
+    train_alignments: str = "data/processed/alignments/train.jsonl"
+    dev_window_val_dir: str = "data/processed/dev_window_val"
 
     @classmethod
     def from_mapping(cls, mapping: dict[str, Any] | None) -> "DataSettings":
@@ -428,6 +446,8 @@ class TrainConfig:
     # 正解モーラ数0の無音・雑音サンプルの追加（spkrate.train.silence、docs/spec.md「学習データ」）。
     # 拡張とは独立に有効化できる。
     silence_samples: SilenceSettings = field(default_factory=SilenceSettings)
+    # 方式Bの窓の設定（data.source=windows のとき使う。spkrate.train.method_b）。
+    windows: WindowSettings = field(default_factory=WindowSettings)
     # 再開元のチェックポイント（モジュール docstring「チェックポイントからの再開」）。
     resume_from: str | None = None
     notes: str = ""
@@ -440,11 +460,17 @@ class TrainConfig:
         train = TrainSettings.from_mapping(payload.pop("train", None))
         augment = AugmentSettings.from_mapping(payload.pop("augment", None))
         silence = SilenceSettings.from_mapping(payload.pop("silence_samples", None))
+        windows = WindowSettings.from_mapping(payload.pop("windows", None))
         payload = _reject_unknown(cls, payload)
         if "experiment_id" not in payload:
             raise ValueError("experiment_id が設定に無い")
         return cls(
-            **payload, data=data, train=train, augment=augment, silence_samples=silence
+            **payload,
+            data=data,
+            train=train,
+            augment=augment,
+            silence_samples=silence,
+            windows=windows,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -805,17 +831,17 @@ def build_datasets(
         config.data.normalization, mode=config.data.normalization_mode
     )
     source = config.train_source
-    if source not in {"features", "waveform"}:
-        raise ValueError(f"data.source は features か waveform: {source}")
+    if source not in TRAIN_SOURCES:
+        raise ValueError(f"data.source は {TRAIN_SOURCES} のいずれか: {source}")
     if config.augment.enabled and source == "features":
         raise ValueError(
             "拡張ありでは事前計算特徴量を使えない（docs/decisions/006-augmentation.md 1節: "
             "拡張は波形に適用する）。data.source を waveform にすること"
         )
-    if config.data.dev_source != "features":
+    if config.data.dev_source not in DEV_SOURCES:
         raise ValueError(
-            "検証は事前計算特徴量（data/processed/features/dev）を使う。"
-            f"dev_source={config.data.dev_source} は想定していない"
+            f"data.dev_source は {DEV_SOURCES} のいずれか: {config.data.dev_source}"
+            "（検証は事前計算特徴量を使う）"
         )
 
     features_dir = Path(config.data.features_dir)
@@ -829,6 +855,8 @@ def build_datasets(
             limit=config.data.max_train_clips,
             max_frames=config.data.max_frames,
         )
+    elif source == "windows":
+        train_dataset = _build_window_dataset(config, normalizer, log)
     else:
         records = select_clip_records(
             config.data.clips_jsonl,
@@ -864,20 +892,80 @@ def build_datasets(
 
     from spkrate.data.splits import load_split as _load_split
 
-    dev_dataset: Dataset = FeatureClipDataset(
-        features_dir / "dev",
-        client_ids=_load_split(config.data.dev_split),
-        normalizer=normalizer,
-        limit=config.data.max_dev_clips,
-    )
+    if config.data.dev_source == "dev_window_val":
+        from spkrate.eval.dev_window_val import DevWindowValDataset
+
+        dev_dataset: Dataset = DevWindowValDataset(
+            config.data.dev_window_val_dir,
+            normalizer=normalizer,
+            limit=config.data.max_dev_clips,
+            window_sec=config.windows.window_sec,
+        )
+    else:
+        dev_dataset = FeatureClipDataset(
+            features_dir / "dev",
+            client_ids=_load_split(config.data.dev_split),
+            normalizer=normalizer,
+            limit=config.data.max_dev_clips,
+        )
     log.info(
-        "データ: 学習=%d件（経路=%s、拡張=%s） 検証=%d件（経路=features、拡張なし）",
+        "データ: 学習=%d件（経路=%s、拡張=%s） 検証=%d件（経路=%s、拡張なし）",
         len(train_dataset),  # type: ignore[arg-type]
         source,
         "あり" if config.augment.enabled else "なし",
         len(dev_dataset),  # type: ignore[arg-type]
+        config.data.dev_source,
     )
     return train_dataset, dev_dataset, normalizer
+
+
+def _build_window_dataset(
+    config: TrainConfig, normalizer: Normalizer, log: logging.Logger
+) -> WindowTrainDataset:
+    """方式Bの学習データ（docs/decisions/009-method-b.md。spkrate.train.method_b）。"""
+    if not config.data.train_clip_list:
+        raise ValueError(
+            "data.source=windows には data.train_clip_list（学習に使う clip_id の一覧）が必要"
+        )
+    clip_ids = read_clip_list(config.data.train_clip_list)
+    clips, starts, ends = load_train_clips(
+        clip_ids,
+        clips_jsonl=config.data.clips_jsonl,
+        train_split=config.data.train_split,
+        alignments_path=config.data.train_alignments,
+        sample_rate=config.windows.sample_rate,
+        limit=config.data.max_train_clips,
+    )
+    dataset = WindowTrainDataset(
+        clips,
+        starts,
+        ends,
+        audio_root=config.data.audio_root,
+        settings=config.windows,
+        normalizer=normalizer,
+        augment=config.augment.build(),
+        noise_source=_build_noise_source(config, log),
+        seed=config.seed,
+    )
+    log.info(
+        "方式B: 一覧=%s（%d件、使用%d件） アライメント=%s 窓=%.2f秒 余白=%.2f秒 "
+        "単一の窓=%d 連結の窓=%d（1対1） 2.0秒未満のクリップ=%d（うち連結に使えない話者の分=%d） "
+        "組の作れない話者=%d（%dクリップ） エポック0の組の作成=%s",
+        config.data.train_clip_list,
+        len(clip_ids),
+        len(clips),
+        config.data.train_alignments,
+        config.windows.window_sec,
+        config.windows.margin_sec,
+        dataset.num_single,
+        dataset.num_single,
+        dataset.stats["short_clips"],
+        dataset.stats["short_clips_unused_too_few"],
+        dataset.stats["speakers_too_few_clips"],
+        dataset.stats["clips_unused_too_few"],
+        dataset.group_stats,
+    )
+    return dataset
 
 
 def check_augment_setup(
@@ -913,7 +1001,7 @@ def check_augment_setup(
         return ["拡張=なし"]
 
     source = config.train_source
-    if source != "waveform":
+    if source not in {"waveform", "windows"}:
         raise AugmentSetupError(
             f"augment.enabled=true だが data.source={source} で、拡張が掛からない"
             "（拡張は波形に適用する。docs/decisions/006-augmentation.md 1節）。"
@@ -1079,6 +1167,7 @@ def _train_one_epoch(
     total_abs_error = 0.0
     augment_counts: dict[str, int] = {}
     silence_clips = 0
+    window_stats = WindowEpochStats()
     data_wait_seconds = 0.0
     step_seconds = 0.0
     started = time.perf_counter()
@@ -1091,6 +1180,10 @@ def _train_one_epoch(
         for names in getattr(batch, "augment_applied", ()):
             for name in names:
                 augment_counts[name] = augment_counts.get(name, 0) + 1
+        if any(batch.kinds):
+            window_stats.update(
+                batch.kinds, batch.stretches, batch.moras.tolist(), batch.durations.tolist()
+            )
         batch = batch.to(device)
         prediction = model(batch.features, batch.lengths)
         loss = loss_fn(prediction, batch.moras)
@@ -1135,6 +1228,8 @@ def _train_one_epoch(
         "train_silence_clips": silence_clips,
         # 学習中に実際に掛かった拡張の回数。metrics.jsonl には書かず、ログにだけ出す。
         "augment_counts": augment_counts,
+        # 方式Bの窓の集計（方式Aでは None）。metrics.jsonl とログに書く。
+        "window_stats": window_stats if window_stats.total else None,
     }
 
 
@@ -1569,6 +1664,10 @@ def run_training(
                 logger=log,
             )
             augment_counts = train_stats.pop("augment_counts", {})
+            window_stats = train_stats.pop("window_stats", None)
+            if window_stats is not None:
+                log.info("%s", window_stats.describe(epoch))
+                train_stats.update(window_stats.as_dict())
             if config.augment.enabled:
                 log.info(
                     "%s",
