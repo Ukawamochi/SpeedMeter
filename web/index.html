@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpeedMeter 確認用</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 16px; max-width: 960px; line-height: 1.5; }
+  button { font-size: 1rem; padding: 0.5em 1em; margin-right: 0.5em; }
+  pre { background: #f4f4f4; padding: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+  table { border-collapse: collapse; }
+  td, th { border: 1px solid #ccc; padding: 2px 8px; text-align: right; }
+  .note { color: #a33; }
+</style>
+</head>
+<body>
+<h1>SpeedMeter 確認用ページ</h1>
+<p class="note">確認用（仕様の実装ではない）。モデル: models/model_fp32.onnx（exp005 の fp32）。
+  窓ごとの推論は docs/spec.md の定義（2.0秒窓・0.25秒ずらし・窓全体が収まるものだけ）に従う。
+  「クリップ全体を1回入力」は仕様に無い入力で、比較のための確認用の表示である。</p>
+
+<p>
+  <button id="record">録音開始</button>
+  <button id="reference">参照入力で実行</button>
+</p>
+<p id="status">待機中</p>
+
+<div id="result"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
