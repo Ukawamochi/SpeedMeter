@@ -13,6 +13,17 @@
 
 動作確認（results/metrics.csv に書かない）:
     ... --metrics-csv /tmp/check/metrics.csv --output-json /tmp/check/latency.json
+
+ONNX（第8段階 8-3）: ``--onnx <model.onnx>`` を繰り返して、ONNX Runtime（CPU の実行プロバイダ）での
+推論も同じセッションで測る（``spkrate.export.to_onnx.make_onnx_inference``。範囲は同じく
+対数メル計算 → 正規化（グラフ内）→ 前向き計算）。``--onnx-experiment-id``・``--onnx-threads``
+（intra_op_num_threads。0 は ONNX Runtime の既定）・``--onnx-config``・``--onnx-method`` は
+``--onnx`` と同じ数だけ与える。metrics.csv の device 列は cpu、model_size_bytes は ONNX ファイルの大きさ。
+``--checkpoint`` を省いて ONNX だけを測ることもできる（そのときは同期をしない）。例:
+    uv run python scripts/measure_latency.py \\
+        --checkpoint runs/exp005/checkpoint_best.pt --experiment-id 010-exp005-method-b \\
+        --onnx runs/onnx_exp005/model_fp32.onnx --onnx-experiment-id onnx-exp005-fp32 --onnx-threads 0 \\
+        --onnx runs/onnx_exp005/model_int8.onnx --onnx-experiment-id onnx-exp005-int8 --onnx-threads 0
 """
 
 from __future__ import annotations
@@ -66,7 +77,7 @@ def _per_model(values: list[str] | None, count: int, name: str) -> list[str | No
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--checkpoint", action="append", required=True,
+    parser.add_argument("--checkpoint", action="append", default=[],
                         help="測るチェックポイント（2つ以上を同じセッションで測る。繰り返して指定）")
     parser.add_argument("--experiment-id", action="append",
                         help="metrics.csv の実験ID（--checkpoint と同じ順・同じ数。省略時は runs/ 以下のディレクトリ名）")
@@ -74,6 +85,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="metrics.csv の設定ファイルのパス（省略時は同じディレクトリの config_snapshot.yaml）")
     parser.add_argument("--method", action="append",
                         help=f"metrics.csv の手法名（省略時は {DEFAULT_METHOD!r}）")
+    parser.add_argument("--onnx", action="append", default=[], help="ONNX のモデル（繰り返して指定）")
+    parser.add_argument("--onnx-experiment-id", action="append", help="--onnx ごとの実験ID（必須）")
+    parser.add_argument("--onnx-threads", action="append", type=int,
+                        help="--onnx ごとの intra_op_num_threads（0 は ONNX Runtime の既定。省略時はすべて0）")
+    parser.add_argument("--onnx-config", action="append", help="--onnx ごとの設定ファイルのパス（metrics.csv）")
+    parser.add_argument("--onnx-method", action="append", help="--onnx ごとの手法名（metrics.csv）")
     parser.add_argument("--repeats", type=int, default=DEFAULT_REPEATS)
     parser.add_argument("--warmup", type=int, default=DEFAULT_WARMUP)
     parser.add_argument("--no-interleave", action="store_true",
@@ -91,10 +108,21 @@ def main(argv: list[str] | None = None) -> int:
     logger = logging.getLogger("measure_latency")
 
     checkpoints = [Path(p) for p in args.checkpoint]
+    onnx_paths = [Path(p) for p in args.onnx]
+    if not checkpoints and not onnx_paths:
+        raise SystemExit("--checkpoint か --onnx を1つ以上与える")
+    onnx_ids = _per_model(args.onnx_experiment_id, len(onnx_paths), "onnx-experiment-id")
+    if any(e is None for e in onnx_ids):
+        raise SystemExit("--onnx には --onnx-experiment-id を同じ数だけ与える")
+    onnx_threads = [t or 0 for t in _per_model(args.onnx_threads, len(onnx_paths), "onnx-threads")]
+    onnx_configs = [c or "" for c in _per_model(args.onnx_config, len(onnx_paths), "onnx-config")]
+    onnx_methods = [m or f"cnn (話速推定CNN) ONNX Runtime CPUExecutionProvider {p.name} threads={t or 'default'}"
+                    for m, p, t in zip(_per_model(args.onnx_method, len(onnx_paths), "onnx-method"),
+                                       onnx_paths, onnx_threads)]
     ids = [e or _default_experiment_id(c) for e, c in
            zip(_per_model(args.experiment_id, len(checkpoints), "experiment-id"), checkpoints)]
-    if len(set(ids)) != len(ids):
-        raise SystemExit(f"実験IDが重複している: {ids}")
+    if len(set(ids + onnx_ids)) != len(ids) + len(onnx_ids):
+        raise SystemExit(f"実験IDが重複している: {ids + onnx_ids}")
     configs = [c or _default_config(p) for c, p in
                zip(_per_model(args.config, len(checkpoints), "config"), checkpoints)]
     methods = [m or DEFAULT_METHOD for m in _per_model(args.method, len(checkpoints), "method")]
@@ -113,13 +141,28 @@ def main(argv: list[str] | None = None) -> int:
         model, _ = load_checkpoint(checkpoint, map_location="cpu")
         inferences[experiment_id] = make_cnn_inference(model.to(device).eval(), normalizer, device)
 
+    onnx_record = {}
+    if onnx_paths:
+        import onnxruntime
+
+        from spkrate.export.to_onnx import make_onnx_inference, make_session
+
+        for experiment_id, path, threads in zip(onnx_ids, onnx_paths, onnx_threads):
+            ort_session = make_session(path, intra_op_threads=threads or None)
+            inferences[experiment_id] = make_onnx_inference(ort_session)
+            onnx_record[experiment_id] = {"path": str(path), "intra_op_threads": threads,
+                                          "providers": ort_session.get_providers()}
+        onnx_record["onnxruntime"] = onnxruntime.__version__
+        logger.info("onnx: %s", json.dumps(onnx_record, ensure_ascii=False))
+
+    # ONNX だけを測るときは同期しない（ONNX Runtime の CPU 実行は呼び出しの中で終わる）。
+    synchronize = device_synchronizer(device) if checkpoints else (lambda: None)
     commit = git_commit_info()
     with MpsFallbackWatcher(logger) as watcher:
         session = measure_session(inferences, make_window(), repeats=args.repeats, warmup=args.warmup,
-                                  interleave=not args.no_interleave,
-                                  synchronize=device_synchronizer(device))
+                                  interleave=not args.no_interleave, synchronize=synchronize)
     logger.info("latency_session_id: %s", session.session_id)
-    for experiment_id in ids:
+    for experiment_id in ids + onnx_ids:
         logger.info("latency %s", json.dumps(session.results[experiment_id].summary(), ensure_ascii=False))
     logger.info("mps_cpu_fallback_events: %d %s", len(watcher.events),
                 json.dumps(watcher.events, ensure_ascii=False) if watcher.events else "")
@@ -129,6 +172,11 @@ def main(argv: list[str] | None = None) -> int:
                             commit_hash=commit.commit_hash, commit_dirty=commit.dirty_flag,
                             device=device.type)
             for e, m, c, p in zip(ids, methods, configs, checkpoints)]
+    rows += [latency_csv_row(session.results[e], session.session_id, experiment_id=e, method=m,
+                             config_path=c, model_size_bytes=model_size_bytes(p),
+                             commit_hash=commit.commit_hash, commit_dirty=commit.dirty_flag, device="cpu")
+             for e, m, c, p in zip(onnx_ids, onnx_methods, onnx_configs, onnx_paths)]
+    all_ids = ids + onnx_ids
     if not args.no_metrics_csv:
         for row in rows:
             append_metrics_row(row, csv_path=args.metrics_csv)
@@ -140,9 +188,10 @@ def main(argv: list[str] | None = None) -> int:
                   "interleave": session.interleave, "repeats": args.repeats, "warmup": args.warmup,
                   "commit_hash": commit.commit_hash, "commit_dirty": commit.dirty_flag,
                   "checkpoints": {e: str(p) for e, p in zip(ids, checkpoints)},
-                  "summary": {e: session.results[e].summary() for e in ids},
-                  "times_ms": {e: list(session.results[e].times_ms) for e in ids},
-                  "rounds_first": [list(r) for r in session.rounds[: len(ids)]],
+                  "onnx": onnx_record, "synchronize": "device" if checkpoints else "none",
+                  "summary": {e: session.results[e].summary() for e in all_ids},
+                  "times_ms": {e: list(session.results[e].times_ms) for e in all_ids},
+                  "rounds_first": [list(r) for r in session.rounds[: len(all_ids)]],
                   "mps_cpu_fallback_events": watcher.events}
         output.write_text(json.dumps(detail, ensure_ascii=False, indent=2), encoding="utf-8")
     print("LATENCY_DONE", session.session_id, flush=True)
