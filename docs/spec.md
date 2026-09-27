@@ -223,6 +223,18 @@ dev_noisy は `configs/eval/dev_noisy.yaml`（実装は `src/spkrate/eval/noisy.
   - 根拠: 窓単位の目標0.76 mora/s（= クリップ単位の目標0.50 × √k、平均クリップ長4.630秒で k=2.32、√k=1.52）の3分の1。端の切断による偏りは√kで薄まらないため、目標の3分の1を超える偏りが1つの原因から出ているなら窓ごとのラベルで直接押さえるべき、とする。出典: 005 2.4節末尾、5節 B1行
   - 補足: 取りこぼし幅 d 秒、平均話速 ρ=5.03 とすると誤差は dρ mora/s で、d=0.05秒で0.25、d=0.1秒で0.50（005 2.3節）。閾値は実測に基づく値ではない（005 7節）
 
+#### D1 雑音下（補助）
+
+2026-09-27 に人間の指示（`docs/directives/2026-09-27.md` 0節3）で加えた定義。測定の実施は 2026-09-26 の指示（`docs/directives/2026-09-26.md` 0節5。7-2 以降の評価で D1 を雑音下でも測り、補助の値として記録する）による。実装は `scripts/window_diagnostics.py` の `--d1-noisy-config`（9241a8c）。
+
+- 入力: D1 と同じ1,000件のクリップ（同じ乱数の種・同じ抽出。雑音下の測定は D1〜D3 の標本抽出の乱数生成器を消費しないため、D2・D3 の標本は雑音下の測定の有無で変わらない）
+- 加工: 各クリップの**全体**（長さ T 秒の全区間。末尾の半端を捨てる前）に、雑音下評価 dev_noisy と同じ加工（「評価指標」節の「雑音下評価 dev_noisy」。設定は `configs/eval/dev_noisy.yaml`）を掛ける。すなわち固定の残響 → MUSAN noise の評価用（`configs/splits/musan_noise.json` の `eval`）の重畳で、雑音ファイルと切り出し位置はクリップごとに `numpy.random.default_rng([seed, clip_key])`（seed 20260924、clip_key は clip_id の SHA-256 の先頭8バイト）で決まり、SNR に依存しない。SNR は残響後のクリップ全体の実効値に対する比
+- 条件: SNR 5・10・15dB の3条件（dev_noisy と同じ）
+- 手順と値: 加工後の波形に D1 と同じ手順（先頭から重なりなしの2.0秒窓 m 個の単独推論の総和 Σ と、同じ 2.0m 秒の一括推論 P）を当て、クリップごとの |Σ − P| / (2.0m) を条件ごとに1,000件で平均する。単位は mora/s。併せて |Σ − P| / (2.0m) の中央値・第9十分位・最大・標準偏差、符号つきの (Σ − P)/(2.0m) の平均、Σ と P の平均も条件ごとに記録する
+- 3条件まとめ: 3条件の全件（3,000件）をまとめた |Σ − P| / (2.0m) の平均（各条件の件数が等しいので3条件の平均に一致する）。併せて |Σ − P| / (2.0m) の中央値・第9十分位・最大・標準偏差と、符号つきの (Σ − P)/(2.0m) の平均を記録する
+- 位置づけ: **補助の値であり、閾値は置かない。** B1〜B5 の判定は clean の D1 で行い、雑音下の値は判定に使わない。記録と比較に使う
+- 大きいことの意味: 雑音下で窓の端の取りこぼし（または過剰計数）が大きいこと。clean の D1 と同じ読み方をする
+
 ### D2 無音・雑音窓の出力
 
 - 入力: 次の2種、各500本の2.0秒窓（32,000標本）。出典: 005 4.3節
@@ -250,4 +262,5 @@ dev_noisy は `configs/eval/dev_noisy.yaml`（実装は `src/spkrate/eval/noisy.
 
 - exp001: `results/window_diagnostics.md`、`results/window_diagnostics.json`
 - exp002: `results/window_diagnostics_exp002.json`（`results/exp002_eval.md` 参照）
+- D1 雑音下: `scripts/window_diagnostics.py` の出力の json の `D1_noisy`（条件ごとの `conditions` と3条件まとめの `pooled`）と md の「D1 雑音下（補助）」の表。exp005・exp006 の値は `results/exp005_eval.md`・`results/exp006_eval.md` に転記している
 - 閾値に対しては超過の有無だけを記録し、方式Bの採否は判断サブエージェントが行う（`scripts/window_diagnostics.py` の方針）。
