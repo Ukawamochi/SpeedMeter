@@ -354,3 +354,7 @@
 ### 2026-09-28 測定: 指示書 2026-09-27 A-3 exp009（起動）
 - configs/exp009.yaml と configs/model/cnn_freq16.yaml（exp005 から周波数段のチャネル数だけ [32, 64, 64] → [16, 32, 32]）を exp/014-freq-ch-half に置いた（9e9de29）。パラメータ数 334,305（exp005 498,881）、積和 102.4 百万（239.5）、受容野 69 フレームで 011 の見込みと一致。
 - Mac の mps で 00:14 に学習を起動した（worktree SpeedMeter-wt-c から。出力は runs_dir を絶対パスにして元の runs/exp009）。
+
+### 2026-09-28 実装: 指示書 2026-09-27 A-3（exp010 の伸縮率の分布と MACs）
+- feat/stretch-dist-macs（e2be66e〜95f256b）: AugmentConfig.time_stretch_distribution（uniform / log_uniform、既定 uniform。乱数の消費は同じ1回、方式A・B両方）、WindowTrainDataset.window_label と scripts/epoch_window_label_distribution.py、cnn.estimate_macs（model_summary に macs_201_frames）。pytest 801 passed・5 skipped。
+- exp005 の設定のエポック1の窓（455,286件から20,000件を抽出）の16モーラ以上の割合: uniform 20.8%、log_uniform 22.3%。MACs は 011 1.2節の見込みと一致（exp005 239.5・exp009 102.4・exp012 185.1・exp013 61.7 百万）。
