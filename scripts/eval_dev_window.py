@@ -24,6 +24,18 @@
 （``results/no_speech_suspect_dev.tsv``。規則は ``configs/eval/no_speech.yaml``）のクリップを由来に
 持つ窓（単一クリップの窓と、そのクリップを含む連結の組の全窓）を除く。除かない値も併記する。
 
+他のモデル（exp005 など）: ``--model-key``・``--checkpoint``（predict と summarize）、
+``--model-config``・``--experiment-id``・``--method-name``（summarize）で対象のモデルを切り替え、
+``--no-envelope``（両方）で包絡ベースラインを省く。既定値は exp004 と包絡の評価と同じ。
+推論の経路は exp004 と同じ（モデルの出力は窓内のモーラ数）。例:
+    PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python scripts/eval_dev_window.py predict \\
+        --out-dir runs/exp005/window_eval --model-key exp005 \\
+        --checkpoint runs/exp005/checkpoint_best.pt --no-envelope
+    uv run python scripts/eval_dev_window.py summarize --out-dir runs/exp005/window_eval \\
+        --model-key exp005 --checkpoint runs/exp005/checkpoint_best.pt --no-envelope \\
+        --model-config configs/exp005.yaml --experiment-id 010-exp005-method-b \\
+        --method-name "..." --append-metrics
+
 configs/splits/test.json は使わない。data/ 以下は読むだけ。
 
 実行（リポジトリ直下から）:
@@ -82,6 +94,11 @@ def log(message: str) -> None:
     print(f"{datetime.now().isoformat(timespec='seconds')} {message}", flush=True)
 
 
+def method_keys(args: argparse.Namespace) -> tuple[str, ...]:
+    """予測・集計の対象（モデルの名前と、省かなければ包絡）。既定は ``METHODS`` と同じ。"""
+    return (args.model_key,) if args.no_envelope else (args.model_key, "envelope")
+
+
 def condition_names(config) -> list[str]:
     return ["clean"] + [f"snr{float(s):g}" for s in config.noisy.snr_db]
 
@@ -121,13 +138,14 @@ def cmd_predict(args: argparse.Namespace) -> int:
     from spkrate.device import setup_device, synchronize
 
     device, device_record = setup_device(args.device, logger)
-    model, payload = load_checkpoint(str(_resolve(CHECKPOINT)), map_location="cpu")
+    model, payload = load_checkpoint(str(_resolve(args.checkpoint)), map_location="cpu")
     model = model.to(device).eval()
     normalizer = load_normalization(_resolve(NORMALIZATION))
     predict = make_predictor(model, normalizer, device, batch_size=args.batch_size)
-    envelope = EnvelopeSpeedEstimator(load_params(_resolve(ENVELOPE_CONFIG)))
-    log(f"device={device} checkpoint={CHECKPOINT} best_epoch={payload['epoch']} "
-        f"windows={len(ws)} sources={len(ws.sources)} commit={_commit()}")
+    envelope = None if args.no_envelope else EnvelopeSpeedEstimator(load_params(_resolve(ENVELOPE_CONFIG)))
+    methods = method_keys(args)
+    log(f"device={device} checkpoint={args.checkpoint} best_epoch={payload['epoch']} "
+        f"methods={','.join(methods)} windows={len(ws)} sources={len(ws.sources)} commit={_commit()}")
 
     conditions = condition_names(config) if args.conditions is None else args.conditions.split(",")
     with_windows = np.flatnonzero(ranges[:, 1] > ranges[:, 0])
@@ -149,7 +167,8 @@ def cmd_predict(args: argparse.Namespace) -> int:
                 if window.size != W:
                     raise ValueError(f"窓が音源の外にはみ出す: {source.source_id} {start}")
                 waves.append(window)
-                env.append(float(envelope(window, config.sample_rate)) * config.window_sec)
+                if envelope is not None:
+                    env.append(float(envelope(window, config.sample_rate)) * config.window_sec)
             t_env += time.perf_counter() - t0
             index_parts.append(np.arange(lo, hi, dtype=np.int64))
         t0 = time.perf_counter()
@@ -221,17 +240,20 @@ def cmd_predict(args: argparse.Namespace) -> int:
                 if part.exists():
                     continue
                 index, model_mora, env_mora, t = run_sources(chunk, snr)
-                np.savez(part, index=index, exp004=model_mora, envelope=env_mora,
+                arrays = {args.model_key: model_mora}
+                if envelope is not None:
+                    arrays["envelope"] = env_mora
+                np.savez(part, index=index, **arrays,
                          **{k: np.float32(v) for k, v in t.items()})
                 for k in totals:
                     totals[k] += t[k]
                 log(f"{name} chunk {number + 1}/{len(chunks)} windows={index.size} "
                     f"elapsed={time.perf_counter() - started:.0f}s {json.dumps({k: round(v, 1) for k, v in t.items()})}")
-            merged = {m: np.full(len(ws), np.nan, dtype=np.float32) for m in METHODS}
+            merged = {m: np.full(len(ws), np.nan, dtype=np.float32) for m in methods}
             part_totals = {"wave_sec": 0.0, "envelope_sec": 0.0, "model_sec": 0.0}
             for number in range(len(chunks)):
                 with np.load(parts_dir / f"{name}_{number:04d}.npz") as data:
-                    for m in METHODS:
+                    for m in methods:
                         merged[m][data["index"]] = data[m]
                     for k in part_totals:
                         part_totals[k] += float(data[k])
@@ -244,7 +266,8 @@ def cmd_predict(args: argparse.Namespace) -> int:
         meta_path = out_dir / "predict_meta.json"
         meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
         meta.setdefault("timing", {}).update(timing)
-        meta.update({"commit": _commit(), "checkpoint": CHECKPOINT, "best_epoch": int(payload["epoch"]),
+        meta.update({"commit": _commit(), "checkpoint": args.checkpoint, "methods": list(methods),
+                     "best_epoch": int(payload["epoch"]),
                      "device": str(device), "host": device_record, "batch_size": args.batch_size,
                      "chunk_sources": args.chunk_sources, "windows": len(ws),
                      "mps_cpu_fallback_events": meta.get("mps_cpu_fallback_events", []) + watcher.events})
@@ -279,10 +302,16 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     ws = load_dev_window(_resolve(config.output_dir))
     out_dir = _resolve(args.out_dir)
     conditions = condition_names(config)
+    methods = method_keys(args)
+    experiment_ids = {**EXPERIMENT_IDS, args.model_key: args.experiment_id or EXPERIMENT_IDS.get(args.model_key)}
+    method_names = {**METHOD_NAMES, args.model_key: args.method_name or METHOD_NAMES.get(args.model_key)}
+    method_configs = {**METHOD_CONFIGS, args.model_key: args.model_config}
+    if args.append_metrics and not (experiment_ids[args.model_key] and method_names[args.model_key]):
+        raise SystemExit(f"--model-key {args.model_key} には --experiment-id と --method-name が要る")
     preds = {}
     for name in conditions:
         with np.load(out_dir / f"pred_{name}.npz") as data:
-            preds[name] = {m: data[m].astype(np.float32) for m in METHODS}
+            preds[name] = {m: data[m].astype(np.float32) for m in methods}
 
     known_ids = load_known_no_speech(_resolve(config.known_no_speech_list))
     suspect_ids = load_suspect_ids(_resolve(SUSPECT_TSV))
@@ -311,7 +340,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
         "results": {},
     }
     for name in conditions:
-        for method in METHODS:
+        for method in methods:
             pred = preds[name][method]
             entry: dict = {}
             for scope, base in (("main", keep), ("unfiltered", np.ones(len(ws), dtype=bool))):
@@ -325,7 +354,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
             summary["results"][f"{name}/{method}"] = entry
 
     # 雑音下3条件のまとめ
-    for method in METHODS:
+    for method in methods:
         entry = {}
         for scope, base in (("main", keep), ("unfiltered", np.ones(len(ws), dtype=bool))):
             t = np.concatenate([true[base]] * 3)
@@ -377,7 +406,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     log(f"summary written: {out_dir / 'summary.json'}")
 
     if args.append_metrics:
-        size = model_size_bytes(_resolve(CHECKPOINT))
+        size = model_size_bytes(_resolve(args.checkpoint))
         # host・device 列: exp004 は予測を作った計算機とデバイス（predict_meta.json）、包絡は cpu。
         meta_path = out_dir / "predict_meta.json"
         meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
@@ -385,7 +414,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
         predict_device = str(meta["device"]).split(":")[0] if meta.get("device") else None
         durations = [W_SEC] * int(keep.sum())
         split_names = {"clean": "dev_window", **{n: f"dev_window_noisy_{n}" for n in conditions[1:]}}
-        for method in METHODS:
+        for method in methods:
             rows = []
             parts_t, parts_p = [], []
             for name in conditions:
@@ -398,17 +427,18 @@ def cmd_summarize(args: argparse.Namespace) -> int:
             pooled = compute_metrics(np.concatenate(parts_t).tolist(), np.concatenate(parts_p).tolist(),
                                      [W_SEC] * int(keep.sum()) * len(parts_t))
             rows.append(("dev_window_noisy_all", pooled))
-            config_path = f"{METHOD_CONFIGS[method]};{CONFIG};{NO_SPEECH_CONFIG}"
+            config_path = f"{method_configs[method]};{CONFIG};{NO_SPEECH_CONFIG}"
+            is_model = method == args.model_key
             for split, metrics in rows:
                 append_metrics_row(MetricsRow(
-                    experiment_id=EXPERIMENT_IDS[method], method=METHOD_NAMES[method],
+                    experiment_id=experiment_ids[method], method=method_names[method],
                     config_path=config_path, split=split, metrics=metrics,
                     latency_ms_per_inference=float("nan"),
-                    model_size_bytes=size if method == "exp004" else None,
+                    model_size_bytes=size if is_model else None,
                     host=predict_host,
-                    device=predict_device if method == "exp004" else "cpu",
+                    device=predict_device if is_model else "cpu",
                 ), csv_path=_resolve("results/metrics.csv"))
-                log(f"metrics.csv: {EXPERIMENT_IDS[method]} {split} mae={metrics.mae_moras_per_sec:.4f}")
+                log(f"metrics.csv: {experiment_ids[method]} {split} mae={metrics.mae_moras_per_sec:.4f}")
     log("SUMMARIZE_DONE")
     return 0
 
@@ -425,10 +455,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=20260926)
     p.add_argument("--device", default="mps",
                    help="mps・cuda・cpu（既定 mps）。使えない場合は開始前に止める")
-    p.set_defaults(func=cmd_predict)
     s = sub.add_parser("summarize")
     s.add_argument("--out-dir", default=OUT_DIR)
     s.add_argument("--append-metrics", action="store_true")
+    s.add_argument("--model-config", default=MODEL_CONFIG, help="metrics.csv の config_path に書くモデルの設定")
+    s.add_argument("--experiment-id", default=None, help="metrics.csv の実験ID（既定は exp004 の値）")
+    s.add_argument("--method-name", default=None, help="metrics.csv の method（既定は exp004 の値）")
+    for q in (p, s):
+        q.add_argument("--model-key", default="exp004", help="予測の配列名（npz のキー）")
+        q.add_argument("--checkpoint", default=CHECKPOINT)
+        q.add_argument("--no-envelope", action="store_true", help="包絡ベースラインを省く")
+    p.set_defaults(func=cmd_predict)
     s.set_defaults(func=cmd_summarize)
     args = parser.parse_args(argv)
     return args.func(args)
