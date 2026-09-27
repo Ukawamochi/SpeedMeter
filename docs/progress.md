@@ -331,3 +331,7 @@
 - exp005 を ONNX（fp32 2,005,372 B）と int8 動的量子化（529,968 B）に書き出した（runs/onnx_exp005/、再生成は `python -m spkrate.export.to_onnx`）。PyTorch との一致: fp32 は atol 1e-4+rtol 1e-5 で一致（dev_window 最大 7.6e-6 モーラ）、int8 は窓ごとの差の平均 0.092・最大 0.53 モーラ。
 - dev_window clean・主指標の MAE: fp32 0.4755（PyTorch と同じ）、int8 0.4783。推論時間（ONNX Runtime CPU、中央値/平均/最大 ms）: fp32 1.92/2.08/7.93、int8 3.77/3.81/5.45（int8 は Mac の CPU では遅い）。
 - 対数メルの参照値（合成サイン波2件とメルフィルタバンク）と照合テスト、spec.md への計算パラメータの転記を feat/onnx-export に置いた（pytest 746 passed）。実際のクリップの値はリポジトリ外に置き、入れてよいかを questions.md に記録した。結果は results/onnx_export.md。
+
+### 2026-09-27 実装: ブラウザでの確認用ページ（ユーザーの指示）
+- feat/web-demo に web/（録音 → 16kHz 再標本化 → JS の対数メル → onnxruntime-web 1.30.0 で model_fp32.onnx。spec の 2.0秒窓・0.25秒ずらしの窓ごとの出力と、確認用にクリップ全体1回の出力を、ナマの値とパースした値で表示）を置いた。
+- JS の対数メルは参照値と tests/test_melspec_fixtures.py と同じ許容誤差で一致（最大 1.0e-3、値 >−5 の帯 9e-6）。JS の入力を ONNX Runtime に通した出力は Python の経路と最大 1.9e-6 モーラ差（pytest 786 passed）。実マイクでの動作はブラウザで人間が確かめる。
