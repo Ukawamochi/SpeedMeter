@@ -604,3 +604,77 @@ def test_freq_mask_disabled_returns_feature_unchanged() -> None:
     config = AugmentConfig.from_mapping({"freq_mask_prob": 1.0, "freq_mask_enabled": False})
     out = augment_feature(feature, np.random.default_rng(0), config=config)
     np.testing.assert_array_equal(out, feature)
+
+
+# ======================================================================================
+# 伸縮率の分布（docs/experiments/011-search-plan.md 4.2節、exp010）
+
+
+def test_time_stretch_distribution_default_is_uniform_and_unknown_is_rejected() -> None:
+    assert aug.AugmentConfig().time_stretch_distribution == "uniform"
+    assert aug.AugmentConfig.from_mapping({}).time_stretch_distribution == "uniform"
+    config = aug.AugmentConfig.from_mapping({"time_stretch_distribution": "log_uniform"})
+    assert config.time_stretch_distribution == "log_uniform"
+    with pytest.raises(ValueError):
+        aug.AugmentConfig.from_mapping({"time_stretch_distribution": "normal"})
+    with pytest.raises(ValueError):
+        aug.draw_time_stretch(np.random.default_rng(0), 0.7, 1.5, "normal")
+
+
+def test_uniform_stretch_draws_are_unchanged_from_before() -> None:
+    """既定（uniform）の方式Aの抽選の列が変更前と同じ（変更前のコードで記録した値）。"""
+    config = aug.AugmentConfig()
+    rng = np.random.default_rng(7)
+    values = []
+    for _ in range(8):
+        if rng.random() < config.time_stretch_prob:
+            values.append(
+                aug.draw_time_stretch(rng, *config.time_stretch_range, config.time_stretch_distribution)
+            )
+    assert values == [0.9401330279289803, 1.3569827347062131, 0.9424259414554508]
+
+
+def test_log_uniform_consumes_same_random_numbers_as_uniform() -> None:
+    """どちらの分布も乱数の消費は1回で、後に続く乱数の系列が同じになる。"""
+    for seed in range(20):
+        a, b = np.random.default_rng(seed), np.random.default_rng(seed)
+        aug.draw_time_stretch(a, 0.7, 1.5, "uniform")
+        aug.draw_time_stretch(b, 0.7, 1.5, "log_uniform")
+        assert a.random() == b.random()
+
+
+def test_log_uniform_stretch_is_log_uniform_on_range() -> None:
+    """対数一様: [0.7, 1.5] に収まり、log s が一様（中央値 √(0.7·1.5)、s<1 の割合 log(1/0.7)/log(1.5/0.7)）。"""
+    low, high = 0.7, 1.5
+    rng = np.random.default_rng(20260928)
+    values = np.array([aug.draw_time_stretch(rng, low, high, "log_uniform") for _ in range(40000)])
+    assert values.min() >= low and values.max() <= high
+    assert np.median(values) == pytest.approx(math.sqrt(low * high), abs=0.01)
+    assert np.mean(values < 1.0) == pytest.approx(math.log(1 / low) / math.log(high / low), abs=0.01)
+    # log s の十分位が等間隔（一様）
+    logs = np.log(values)
+    edges = np.linspace(math.log(low), math.log(high), 11)
+    counts, _ = np.histogram(logs, bins=edges)
+    assert np.all(np.abs(counts / values.size - 0.1) < 0.01)
+    # 一様とは違う（中央値が (low + high) / 2 = 1.1 より小さい）
+    assert np.median(values) < 1.05
+
+
+def test_log_uniform_is_used_by_augment_waveform_and_rate_estimate() -> None:
+    """方式Aの経路（augment_waveform）でも分布の指定が効き、他の拡張の乱数はずれない。"""
+    samples = (np.random.default_rng(1).standard_normal(8000) * 0.1).astype(np.float32)
+    base = aug.AugmentConfig(
+        time_stretch_prob=1.0,
+        reverb_enabled=False,
+        noise_enabled=False,
+        band_limit_enabled=False,
+        volume_prob=1.0,
+    )
+    log_cfg = aug.AugmentConfig(**{**base.__dict__, "time_stretch_distribution": "log_uniform"})
+    ru = aug.augment_waveform(samples, np.random.default_rng(3), config=base)
+    rl = aug.augment_waveform(samples, np.random.default_rng(3), config=log_cfg)
+    u = float(np.random.default_rng(3).uniform(0.7, 1.5, size=2)[1])  # random() の次の1回
+    assert ru.stretch == pytest.approx(u)
+    assert rl.stretch == pytest.approx(math.exp(math.log(0.7) + (u - 0.7) / 0.8 * math.log(1.5 / 0.7)))
+    assert ru.params["gain_db"] == rl.params["gain_db"]
+    aug.validate_augment_config(log_cfg)

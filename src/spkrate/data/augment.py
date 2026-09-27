@@ -78,6 +78,8 @@ __all__ = [
     "band_limit",
     "change_volume",
     "describe_application_rates",
+    "TIME_STRETCH_DISTRIBUTIONS",
+    "draw_time_stretch",
     "describe_augment_config",
     "estimate_application_rates",
     "fit_noise",
@@ -124,6 +126,39 @@ def _uniform(rng: np.random.Generator, bounds: Sequence[float]) -> float:
 
 # --------------------------------------------------------------------------------------
 # 時間伸縮
+
+# 伸縮率の分布（docs/experiments/011-search-plan.md 4.2節）。範囲は docs/spec.md の
+# 「0.7〜1.5倍」のまま、範囲の中の分布だけを選ぶ。既定は ``uniform``（従来の挙動）。
+TIME_STRETCH_DISTRIBUTIONS: tuple[str, ...] = ("uniform", "log_uniform")
+
+
+def draw_time_stretch(
+    rng: np.random.Generator, low: float, high: float, distribution: str = "uniform"
+) -> float:
+    """伸縮率を [low, high] から1つ引く。
+
+    - ``uniform``: ``rng.uniform(low, high)``（従来と同じ値）
+    - ``log_uniform``: ``exp(rng.uniform(log(low), log(high)))``。中央値は √(low · high)
+
+    どちらも乱数を ``rng.uniform`` の1回だけ消費する（``low == high`` なら消費しない）ので、
+    分布を変えても後に続く拡張の乱数の系列はずれない。
+    """
+    low, high = float(low), float(high)
+    if low > high:
+        raise ValueError(f"範囲の下限が上限を超えている: [{low}, {high}]")
+    if distribution not in TIME_STRETCH_DISTRIBUTIONS:
+        raise ValueError(
+            f"time_stretch_distribution は {TIME_STRETCH_DISTRIBUTIONS} のいずれか: {distribution!r}"
+        )
+    if low == high:
+        return low
+    if distribution == "uniform":
+        return float(rng.uniform(low, high))
+    if low <= 0.0:
+        raise ValueError(f"対数一様には正の範囲が要る: [{low}, {high}]")
+    value = math.exp(float(rng.uniform(math.log(low), math.log(high))))
+    # exp(log(x)) の丸めで範囲をわずかに外れることがあるので収める
+    return min(max(value, low), high)
 
 
 def time_stretch(
@@ -679,6 +714,9 @@ class AugmentConfig:
     time_stretch_enabled: bool = True
     time_stretch_prob: float = 0.5
     time_stretch_range: tuple[float, float] = (0.7, 1.5)
+    # 伸縮率の分布。uniform（既定。従来の挙動）か log_uniform（011 4.2節、exp010）。
+    # 方式A（augment_waveform）と方式B（method_b.draw_window_plan）の両方で使う。
+    time_stretch_distribution: str = "uniform"
 
     # 残響（pyroomacoustics）
     reverb_enabled: bool = True
@@ -728,7 +766,13 @@ class AugmentConfig:
                 values[key] = (float(value[0]), float(value[1]))
             else:
                 values[key] = value
-        return replace(cls(), **values)
+        config = replace(cls(), **values)
+        if config.time_stretch_distribution not in TIME_STRETCH_DISTRIBUTIONS:
+            raise ValueError(
+                "time_stretch_distribution は "
+                f"{TIME_STRETCH_DISTRIBUTIONS} のいずれか: {config.time_stretch_distribution!r}"
+            )
+        return config
 
     def disabled(self) -> "AugmentConfig":
         """すべての適用確率を0にした設定（対照実験用）。"""
@@ -800,7 +844,9 @@ def augment_waveform(
     stretch = 1.0
 
     if config.time_stretch_enabled and rng.random() < config.time_stretch_prob:
-        stretch = _uniform(rng, config.time_stretch_range)
+        stretch = draw_time_stretch(
+            rng, *config.time_stretch_range, config.time_stretch_distribution
+        )
         waveform = time_stretch(waveform, stretch, sample_rate=config.sample_rate)
         applied.append("time_stretch")
         if stretch != 1.0:
@@ -1038,6 +1084,11 @@ def validate_augment_config(config: AugmentConfig) -> None:
 
 def _validate_time_stretch(config: AugmentConfig) -> None:
     low, high = config.time_stretch_range
+    if config.time_stretch_distribution not in TIME_STRETCH_DISTRIBUTIONS:
+        raise AugmentSetupError(
+            "time_stretch_distribution は "
+            f"{TIME_STRETCH_DISTRIBUTIONS} のいずれか: {config.time_stretch_distribution!r}"
+        )
     if low <= 0.0:
         raise AugmentSetupError(f"time_stretch_range={config.time_stretch_range} は正の値にすること")
     if low == high == 1.0:
@@ -1118,7 +1169,12 @@ def describe_augment_config(
 
     lines = [
         "拡張=あり 適用順=時間伸縮→残響→雑音重畳→帯域制限→音量変化（波形）→周波数マスク（特徴量）",
-        f"拡張: 時間伸縮 確率={config.time_stretch_prob:g} 伸縮率={span('time_stretch_range')}倍",
+        f"拡張: 時間伸縮 確率={config.time_stretch_prob:g} 伸縮率={span('time_stretch_range')}倍"
+        + (
+            ""
+            if config.time_stretch_distribution == "uniform"
+            else f" 分布={config.time_stretch_distribution}"
+        ),
         f"拡張: 残響 確率={config.reverb_prob:g} RT60={span('rt60_range')}秒 "
         f"部屋={span('room_x_range')}×{span('room_y_range')}×{span('room_z_range')}m "
         f"最大反射次数={config.reverb_max_order}",
@@ -1205,7 +1261,9 @@ def estimate_application_rates(
     for _ in range(int(num_trials)):
         if enabled["time_stretch"] and rng.random() < config.time_stretch_prob:
             selected["time_stretch"] += 1
-            if _uniform(rng, config.time_stretch_range) != 1.0:
+            if draw_time_stretch(
+                rng, *config.time_stretch_range, config.time_stretch_distribution
+            ) != 1.0:
                 counts["time_stretch"] += 1
         if enabled["reverb"] and rng.random() < config.reverb_prob:
             selected["reverb"] += 1

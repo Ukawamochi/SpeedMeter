@@ -29,6 +29,7 @@ from spkrate.models.cnn import (
     CnnConfig,
     SpeechRateCNN,
     count_parameters,
+    estimate_macs,
     load_config,
     model_summary,
     receptive_field_frames,
@@ -469,6 +470,62 @@ def test_model_size_within_target() -> None:
     # int8 に量子化して5MB以下という目標に対する概算
     assert summary["int8_mib"] < 5.0
     assert summary["receptive_field_frames"] == 69
+
+
+# 積和の回数（docs/experiments/011-search-plan.md 1.2節の表。2.0秒窓 = 201フレーム）
+@pytest.mark.parametrize(
+    ("changes", "parameters", "macs", "freq_macs"),
+    [
+        ({}, 498_881, 239_450_496, 150_508_800),  # exp005（cnn_base）
+        ({"freq_channels": (16, 32, 32)}, 334_305, 102_448_896, 38_206_080),  # exp009
+        ({"freq_channels": (8, 16, 16)}, 262_385, 61_734_336, 9_840_960),  # exp013
+        ({"temporal_channels": (64,) * 5}, 228_161, 185_100_096, 150_508_800),  # exp012
+        ({"dilations": (2, 4, 8, 16, 32)}, 498_881, 239_450_496, 150_508_800),  # exp011
+    ],
+)
+def test_estimate_macs_matches_search_plan(
+    changes: dict, parameters: int, macs: int, freq_macs: int
+) -> None:
+    config = load_config(CONFIG_PATH).replace(**changes)
+    model = make_model(config)
+    summary = model_summary(model)
+    assert summary["num_parameters"] == parameters
+    assert summary["macs_201_frames"] == macs
+    assert summary["macs_201_frames_freq"] == freq_macs
+    assert round(macs / 1e6, 1) == {
+        239_450_496: 239.5, 102_448_896: 102.4, 61_734_336: 61.7, 185_100_096: 185.1
+    }[macs]
+    parts = estimate_macs(config)
+    assert parts["total"] == parts["freq"] + parts["temporal"] + parts["head"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{}, {"freq_channels": (16, 32, 32)}, {"freq_pool": "mean"}, {"n_mels": 64, "freq_strides": (2, 1, 2)}],
+)
+@pytest.mark.parametrize("num_frames", [201, 57])
+def test_estimate_macs_matches_forward_hooks(changes: dict, num_frames: int) -> None:
+    """前向き計算の各畳み込みの出力の形から数えた値と一致する（CPU、1件）。"""
+    config = CnnConfig().replace(**changes)
+    model = SpeechRateCNN(config).eval()
+    counted = []
+
+    def hook(module: torch.nn.Module, _inputs: object, output: torch.Tensor) -> None:
+        kernel = 1
+        for k in module.kernel_size:
+            kernel *= int(k)
+        counted.append(module.in_channels // module.groups * kernel * output.numel())
+
+    handles = [
+        m.register_forward_hook(hook)
+        for m in model.modules()
+        if isinstance(m, (torch.nn.Conv1d, torch.nn.Conv2d))
+    ]
+    with torch.no_grad():
+        model(torch.zeros(1, num_frames, config.n_mels))
+    for handle in handles:
+        handle.remove()
+    assert estimate_macs(config, num_frames)["total"] == sum(counted)
 
 
 # --------------------------------------------------------------------------------------

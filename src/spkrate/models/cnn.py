@@ -67,6 +67,7 @@ __all__ = [
     "SpeechRateCNN",
     "build_valid_mask",
     "count_parameters",
+    "estimate_macs",
     "load_config",
     "model_summary",
     "receptive_field_frames",
@@ -512,13 +513,51 @@ def count_parameters(model: nn.Module, *, trainable_only: bool = False) -> int:
     return sum(int(p.numel()) for p in parameters)
 
 
+DEFAULT_MACS_FRAMES: int = 201  # 2.0秒窓（docs/spec.md「モデルの入力単位」）
+
+
+def estimate_macs(config: CnnConfig, num_frames: int = DEFAULT_MACS_FRAMES) -> dict[str, int]:
+    """1回の前向き計算の積和の回数を設定から数える（docs/experiments/011-search-plan.md 1.2節・4.1節）。
+
+    畳み込みごとに「入力チャネル × 出力チャネル × カーネルの要素数 × 出力の要素数」を足す。
+    偏りの加算・活性化・正規化・マスク・softplus・総和は含まない。出力層（1×1）は含める。
+    時間方向の刻みは1なので、出力の時間方向の要素数は ``num_frames`` である。
+    ``freq_pool: mean`` の平均は積和に数えない。
+
+    Returns:
+        ``total``（合計）、``freq``（周波数段）、``temporal``（時間段）、``head``（出力層）。
+    """
+    frames = int(num_frames)
+    if frames < 1:
+        raise ValueError(f"num_frames は1以上: {num_frames}")
+    freq_kernel, time_kernel = config.freq_kernel
+    pad = freq_kernel // 2
+    dim = config.n_mels
+    in_channels = 1
+    freq = 0
+    for out_channels, stride in zip(config.freq_channels, config.freq_strides, strict=True):
+        dim = (dim + 2 * pad - freq_kernel) // stride + 1
+        freq += in_channels * out_channels * freq_kernel * time_kernel * dim * frames
+        in_channels = out_channels
+    temporal = 0
+    in_channels = config.temporal_in_channels
+    for out_channels in config.temporal_channels:
+        temporal += in_channels * out_channels * config.temporal_kernel * frames
+        in_channels = out_channels
+    head = in_channels * 1 * frames
+    return {"total": freq + temporal + head, "freq": freq, "temporal": temporal, "head": head}
+
+
 def model_summary(model: SpeechRateCNN) -> dict[str, object]:
-    """パラメータ数・概算サイズ・受容野をまとめる（runs/ の config_snapshot 用）。
+    """パラメータ数・概算サイズ・受容野・積和の回数をまとめる（runs/ の config_snapshot 用）。
+
+    ``macs_201_frames`` は2.0秒窓（201フレーム）1回の積和の回数（``estimate_macs``）。
 
     ``int8_bytes`` は第3段階の目標「int8量子化後5MB以下」に対する概算で、
     重み1つあたり1バイトとした値である（実際の onnx には量子化の刻み等が加わる）。
     """
     num_parameters = count_parameters(model)
+    macs = estimate_macs(model.config, DEFAULT_MACS_FRAMES)
     return {
         "num_parameters": num_parameters,
         "num_trainable_parameters": count_parameters(model, trainable_only=True),
@@ -531,4 +570,6 @@ def model_summary(model: SpeechRateCNN) -> dict[str, object]:
         "num_layers": model.config.num_layers,
         "freq_dim_out": model.config.freq_dim_out,
         "temporal_in_channels": model.config.temporal_in_channels,
+        "macs_201_frames": macs["total"],
+        "macs_201_frames_freq": macs["freq"],
     }

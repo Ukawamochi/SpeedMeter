@@ -630,3 +630,73 @@ def test_run_training_with_window_dataset(tmp_path: Path) -> None:
     assert row["train_clips"] == len(train) + len(silence)
     assert row["val_clips"] == n
     assert "窓の集計" in (outcome.run_dir / "log.txt").read_text(encoding="utf-8")
+
+
+# ======================================================================================
+# 伸縮率の分布（docs/experiments/011-search-plan.md 4.2節、exp010）
+
+# 変更前のコード（f094f03）で記録した値: 種 (20260921, 1, i)、音源長 [40000, 64000, 120000][i % 3]、
+# AugmentConfig() の既定。(伸縮率, 窓の開始, 抽選に当たったか, 次の random())
+_GOLDEN_PLANS = [
+    (1.2405802597381568, 9828, True, 0.894982455686084),
+    (1.0011578649612467, 31163, True, 0.49547072682173343),
+    (1.0, 12398, False, 0.4625963125916397),
+    (1.2761195538457317, 5161, True, 0.7420798609669378),
+    (1.2895112747272055, 24367, True, 0.6310544948034217),
+    (1.0, 44265, False, 0.18734388622039455),
+    (1.0, 808, False, 0.9941267353078993),
+    (1.3430738967633693, 42630, True, 0.9044851436160809),
+    (0.9741894201201099, 73523, True, 0.5981704169268661),
+    (0.9814316482052319, 6360, True, 0.3884370561077113),
+    (1.0, 7893, False, 0.45370945018777153),
+    (0.9745679867867129, 80006, True, 0.2802268519742359),
+]
+
+
+def test_default_stretch_plan_sequence_is_unchanged() -> None:
+    """既定（uniform）の設定で、窓の取り方と後続の乱数が変更前と同じ。"""
+    for i, (stretch, start, drawn, following) in enumerate(_GOLDEN_PLANS):
+        rng = np.random.default_rng((20260921, 1, i))
+        plan = draw_window_plan(
+            rng, [40000, 64000, 120000][i % 3], window_samples=W, margin_samples=8000, augment=AugmentConfig()
+        )
+        assert (plan.stretch, plan.start, plan.stretch_drawn) == (stretch, start, drawn)
+        assert rng.random() == following
+
+
+def test_log_uniform_plan_keeps_random_stream_and_range() -> None:
+    """対数一様でも抽選の当たり外れと後続の乱数は一様と同じで、伸縮率は [max(0.7, W/N), 1.5]。"""
+    log_cfg = replace(AugmentConfig(), time_stretch_distribution="log_uniform")
+    below = 0
+    drawn_total = 0
+    for i in range(400):
+        n = [40000, 64000, 120000][i % 3]
+        ru, rl = np.random.default_rng((5, 1, i)), np.random.default_rng((5, 1, i))
+        pu = draw_window_plan(ru, n, window_samples=W, margin_samples=8000, augment=AugmentConfig())
+        pl = draw_window_plan(rl, n, window_samples=W, margin_samples=8000, augment=log_cfg)
+        assert pu.stretch_drawn == pl.stretch_drawn
+        assert ru.random() == rl.random()
+        if pl.stretch_drawn:
+            drawn_total += 1
+            assert stretch_lower_bound(0.7, n, W) <= pl.stretch <= 1.5
+            assert pl.stretch <= pu.stretch + 1e-12  # 同じ一様乱数なら対数一様の方が小さいか等しい
+            below += int(pl.stretch < 1.0)
+    assert drawn_total > 100 and below > 0
+
+
+@pytest.mark.parametrize("distribution", ["uniform", "log_uniform"])
+def test_window_label_without_audio_matches_window(distribution: str) -> None:
+    """``window_label``（音声を読まない）の正解・取り方が ``window`` と一致する。"""
+    corpus = _corpus()
+    augment = replace(_stretch_only(prob=0.5), time_stretch_distribution=distribution)
+    ds = corpus.dataset(augment=augment)
+    ds.set_epoch(1)
+    stretched = 0
+    for index in range(len(ds)):
+        label, plan, source = ds.window_label(index)
+        info = ds.window(index)
+        assert plan == info["plan"]
+        assert source == info["source"]
+        assert label == float(info["mora"])
+        stretched += int(plan.stretch != 1.0)
+    assert stretched > 0

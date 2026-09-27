@@ -11,7 +11,8 @@
   非復元抽出する（``build_epoch_concat_groups``）。エポックごとに作り直す（``set_epoch``）
 - 件ごとの乱数は ``default_rng((seed, epoch, index))``。伸縮の抽選 → 伸縮率 → 窓の位置 →
   残りの拡張 → 周波数マスクの順にこの1つの生成器から引く
-- 時間伸縮: 確率 ``time_stretch_prob`` で伸縮し、伸縮率 s は一様 [max(下限, W / N), 上限]。
+- 時間伸縮: 確率 ``time_stretch_prob`` で伸縮し、伸縮率 s は [max(下限, W / N), 上限] の一様
+  （``time_stretch_distribution: log_uniform`` なら対数一様。011 4.2節）。
   窓の開始 w は伸縮後の音源長 N' = round(N · s) に対し {0, …, N' − W} の一様整数
 - 抜粋: 元の時刻で [w / s − 余白, (w + W) / s + 余白] を音源の範囲に切り詰めた区間
   [a, b)（標本）。窓に重なるクリップだけを読み、間の無音は0で埋める（``assemble_excerpt``）
@@ -45,6 +46,7 @@ from spkrate.data.augment import (
     NoiseSource,
     augment_feature_with_status,
     augment_waveform,
+    draw_time_stretch,
     time_stretch,
 )
 from spkrate.eval.dev_window import (
@@ -190,7 +192,11 @@ def draw_window_plan(
             high = float(augment.time_stretch_range[1])
             if low > high:
                 raise ValueError(f"伸縮率の範囲が空: [{low}, {high}]")
-            stretch = low if low == high else float(rng.uniform(low, high))
+            # 分布は time_stretch_distribution（既定 uniform は rng.uniform(low, high) と同じ値）。
+            # どちらの分布も乱数の消費は1回で、後に続く窓の位置・拡張の系列はずれない。
+            stretch = draw_time_stretch(
+                rng, low, high, getattr(augment, "time_stretch_distribution", "uniform")
+            )
     stretched_length = n if stretch == 1.0 else int(round(n * stretch))
     stretched_length = max(stretched_length, window_samples)
     start = int(rng.integers(0, stretched_length - window_samples + 1))
@@ -667,6 +673,43 @@ class WindowTrainDataset(Dataset):
             "applied": applied,
             "rng": rng,
         }
+
+    def window_label(self, index: int) -> tuple[float, WindowPlan, WindowSource]:
+        """index 番目の窓の正解を、音声を読まずに求める（``window`` の ``mora`` と同じ値）。
+
+        正解はアライメント・伸縮率・窓の位置だけで決まる（011 4.2節の学習前の確認に使う）。
+        伸縮後の抜粋の長さは ``time_stretch`` と同じ ``round(抜粋長 · s)``（伸縮なしなら抜粋長）。
+        乱数は ``window`` と同じ生成器から伸縮の抽選 → 伸縮率 → 窓の位置 までを引く。
+
+        Returns:
+            (窓の正解モーラ数, 窓の取り方, 音源)
+        """
+        settings = self.settings
+        w_samples = settings.window_samples
+        source = self.source(index)
+        rng = np.random.default_rng((self.seed, self.epoch, index))
+        plan = draw_window_plan(
+            rng,
+            source.num_samples,
+            window_samples=w_samples,
+            margin_samples=settings.margin_samples,
+            augment=self.augment,
+        )
+        length = plan.excerpt_end - plan.excerpt_start
+        if plan.stretch != 1.0:
+            length = int(round(length * plan.stretch))
+        k = window_start_in_excerpt(plan.start, plan.excerpt_start, plan.stretch, length, w_samples)
+        starts, ends = self.source_moras(source)
+        label = stretched_window_label(
+            starts,
+            ends,
+            excerpt_start=plan.excerpt_start,
+            stretch=plan.stretch,
+            window_start=k,
+            window_sec=settings.window_sec,
+            sample_rate=settings.sample_rate,
+        )
+        return float(label), plan, source
 
     def __getitem__(self, index: int) -> ClipItem:
         info = self.window(index)
