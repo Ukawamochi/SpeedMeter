@@ -28,3 +28,6 @@ runs/
 /data/eval_scripts/*
 !/data/eval_scripts/README.md
 !/data/eval_scripts/selection.json
+
+# 確認用ページ（web/）が読むモデル。scripts/setup_web_model.py が置く（リポジトリに入れない）
+/web/models/
