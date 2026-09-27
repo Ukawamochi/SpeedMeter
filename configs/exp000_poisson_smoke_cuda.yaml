@@ -1,0 +1,72 @@
+# exp008（configs/exp008.yaml、損失 mse → poisson）の本番の前の完走確認（ubuntu-desktop・cuda）。
+# docs/directives/2026-09-27.md 系統A の A-3、docs/experiments/011-search-plan.md 4.3節。
+#
+# これは**本番の学習ではない**。ポアソン損失（train.loss: poisson）はこれまで exp000_smoke でしか
+# 使っていないので、方式Bの学習データ・cuda で、損失が有限のまま下がることだけを確かめる。
+# 件数が小さいので指標に意味は無く、比較に使わない。results/metrics.csv には残さない。
+#
+# 実行（ubuntu-desktop の ~/SpeedMeter から）:
+#   ~/.local/bin/uv run --frozen python -m spkrate.train.train --config configs/exp000_poisson_smoke_cuda.yaml
+#
+# ## exp005（configs/exp005.yaml）との差分
+#
+# - train.loss: mse → poisson（exp008 と同じ変更）
+# - device: mps → cuda（exp008 と同じ）
+# - data.max_train_clips: null → 8192（一覧の先頭8192件。単一と連結の窓で数百バッチになる）
+# - data.max_dev_clips: null → 2048（検証窓の先頭2048件）
+# - train.max_epochs: 30 → 1、train.log_interval: 200 → 20（損失の推移を細かく見る）
+# - experiment_id と notes
+#
+# test.json は使わない。
+
+experiment_id: exp000_poisson_smoke_cuda
+seed: 20260921
+device: cuda         # exp008 と同じ（ubuntu-desktop）
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: exp008（ポアソン損失）の完走確認。指標の比較には使わない
+
+data:
+  source: windows                 # 方式B（spkrate.train.method_b）
+  dev_source: dev_window_val      # 検証は dev_window の抽出50,000窓（事前計算特徴量・拡張なし）
+  dev_window_val_dir: data/processed/dev_window_val
+  train_clip_list: data/processed/train_selection/usable_clip_ids.txt
+  train_alignments: data/processed/alignments/train.jsonl
+  clips_jsonl: data/processed/clips.jsonl
+  train_split: configs/splits/train.json   # test.json は使わない
+  max_train_clips: 8192  # 一覧の先頭8192件（完走確認）
+  max_dev_clips: 2048    # 検証窓の先頭2048件（完走確認）
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+windows:
+  window_sec: 2.0
+  margin_sec: 0.5
+  concat_group_size: [3, 5]      # configs/eval/dev_window.yaml と同じ
+  concat_gap_sec: [0.3, 1.5]
+  concat_gap_round_sec: 0.01
+
+augment:
+  enabled: true      # AugmentConfig の既定値（exp004 と同じ）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json   # MUSAN noise の学習用だけ
+
+silence_samples:
+  enabled: true      # それ以外は exp004 と同じ既定値（割合0.03、3種等分、-90〜-60dBFS、長さは学習入力＝2.0秒）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json
+
+train:
+  max_epochs: 1
+  early_stopping_patience: 5      # 検証の mae_moras_per_sec が5エポック連続で改善しなければ終了
+  batch_size: 64
+  loss: poisson                   # exp008 と同じ変更
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 4
+  bucketing: false   # 全件201フレームなので長さの整列はしない
+  best_metric: mae_moras_per_sec
+  log_interval: 20
+  # results/metrics.csv への追記は学習後の評価で行う。
+  record_metrics_csv: false
