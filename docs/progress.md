@@ -326,3 +326,8 @@
 ### 2026-09-27 測定: 指示書 2026-09-27 A-1（推論の計算機の差、exp007 の起動）
 - exp005 の checkpoint_best.pt（md5 一致）を ubuntu-desktop の cuda で dev_window clean について推論した（f949ef5、570秒）。主指標の MAE は mps 0.475469、cuda 0.475469（4桁で同じ）。窓ごとの予測の差は |差| の平均 1.3e-6、最大 3.8e-5 モーラ毎秒。metrics.csv に 012-compute-diff-exp005-cuda を追記（e939a27）。出力は runs/exp005_cuda_check/。
 - configs/exp007.yaml（exp/012-seed-variance の f949ef5。exp005 と seed 20260929・device cuda だけが違う）で、ubuntu-desktop の tmux で 14:27 に学習を起動した。
+
+### 2026-09-27 実装: 指示書 2026-09-27 系統B（8-1〜8-3）
+- exp005 を ONNX（fp32 2,005,372 B）と int8 動的量子化（529,968 B）に書き出した（runs/onnx_exp005/、再生成は `python -m spkrate.export.to_onnx`）。PyTorch との一致: fp32 は atol 1e-4+rtol 1e-5 で一致（dev_window 最大 7.6e-6 モーラ）、int8 は窓ごとの差の平均 0.092・最大 0.53 モーラ。
+- dev_window clean・主指標の MAE: fp32 0.4755（PyTorch と同じ）、int8 0.4783。推論時間（ONNX Runtime CPU、中央値/平均/最大 ms）: fp32 1.92/2.08/7.93、int8 3.77/3.81/5.45（int8 は Mac の CPU では遅い）。
+- 対数メルの参照値（合成サイン波2件とメルフィルタバンク）と照合テスト、spec.md への計算パラメータの転記を feat/onnx-export に置いた（pytest 746 passed）。実際のクリップの値はリポジトリ外に置き、入れてよいかを questions.md に記録した。結果は results/onnx_export.md。
