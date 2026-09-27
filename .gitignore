@@ -20,3 +20,11 @@ runs/
 
 # 人間の聴取用に音量をそろえた音声のコピー（Common Voice は再共有禁止）
 /listening/*/
+
+# 実環境評価の読み上げ文（第9段階 9-1）。JSUT の文そのもの（sentences.txt・
+# sentences_labeled.tsv）は、再配布の条件の確認（docs/questions.md）が済むまで追跡しない。
+# 手順書と選び方（文IDとモーラ数だけ）は追跡する。録音（data/eval_real/）は追跡しない。
+!/data/eval_scripts/
+/data/eval_scripts/*
+!/data/eval_scripts/README.md
+!/data/eval_scripts/selection.json
