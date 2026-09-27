@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpeedMeter 計算の照合</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 16px; max-width: 960px; line-height: 1.5; }
+  button { font-size: 1rem; padding: 0.5em 1em; }
+  pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<h1>計算の照合（確認用）</h1>
+<p>固定の合成波形（reference/onnx_exp005_fp32.json、3.0 秒、16kHz）を、このブラウザの対数メル（dsp.js）→
+  onnxruntime-web で処理し、Python（対数メル → ONNX Runtime CPU）の出力と比べる。
+  ブラウザの計算が Python と一致するかを確かめるためのページ。<a href="index.html">リアルタイム表示へ</a></p>
+<p><button id="run">参照入力で実行</button></p>
+<p id="status">待機中</p>
+<div id="result"></div>
+<script type="module" src="check.js"></script>
+</body>
+</html>
