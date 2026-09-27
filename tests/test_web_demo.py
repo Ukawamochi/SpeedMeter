@@ -1,7 +1,8 @@
 """ブラウザの確認用ページ（web/）の照合テスト。
 
-- Node のテスト（``web/tests/melspec.test.mjs``。JS の対数メルと tests/fixtures/melspec/ の参照値の照合、
-  窓の切り出し、再標本化、出力のパース）を呼ぶ。node が無ければ skip
+- Node のテスト（``web/tests/*.test.mjs``。JS の対数メルと tests/fixtures/melspec/ の参照値の照合、
+  窓の切り出し、再標本化、出力のパース、リアルタイム表示の環形バッファ・推論のスケジュール・グラフの
+  座標）を呼ぶ。node が無ければ skip
 - ONNX の参照値（``web/reference/onnx_exp005_fp32.json``）: 波形が式から作り直せること、Python の経路の
   出力と一致すること、JS で作った入力（``web/tests/dump_reference_logmel.mjs``）を ONNX Runtime
   （Python、CPU）に通した出力が参照値と一致すること。モデル（``runs/onnx_exp005/model_fp32.onnx``）
@@ -56,8 +57,10 @@ def _model_or_skip(reference: dict) -> Path:
 
 @pytest.mark.skipif(NODE is None, reason="node が無い")
 def test_node_unit_tests() -> None:
-    """web/tests/melspec.test.mjs（node:test）がすべて通る。"""
-    result = subprocess.run([NODE, "--test", str(WEB / "tests" / "melspec.test.mjs")],
+    """web/tests/*.test.mjs（node:test）がすべて通る。"""
+    files = sorted(str(p) for p in (WEB / "tests").glob("*.test.mjs"))
+    assert len(files) >= 2
+    result = subprocess.run([NODE, "--test", *files],
                             capture_output=True, text=True, cwd=ROOT, check=False)
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
 
