@@ -318,3 +318,7 @@
 - feat/record-eval（worktree SpeedMeter-wt-c）に、20文の選択 scripts/select_eval_sentences.py（JSUT basic5000、jsut-label kana_level0 で数えて20〜40モーラ、has_unconverted なし、pyopenjtalk と一致、種 20260927。候補3,081文から選び20〜39モーラ・平均27.9）と録音の道具 scripts/record_eval.py を作った。
 - 道具は Enter で開始・終了、r で録り直し（上書き）、q で終了、16kHz・モノラルで data/eval_real/{mic}_{rate}_{番号}_{文ID}.wav に保存。依存に sounddevice を追加（uv.lock は追加のみ）。手順書 data/eval_scripts/README.md。pytest 765 passed / 3 skipped（cuda）。
 - JSUT の文そのものは再配布の条件の確認まで追跡しない（questions.md に記録）。マージ後に main で select_eval_sentences.py を実行して文の一覧を作る必要がある。
+
+### 2026-09-27 統括: 系統C の停止（人間の録音 9-2 を待つ）
+- feat/record-eval を main にマージした（5d64e02）。main で select_eval_sentences.py を実行し、worktree と同じ20文（data/eval_scripts/、追跡外）を作った。手順書は data/eval_scripts/README.md。
+- 系統C は人間の録音を待って停止する。r キーでの録り直しで notes.txt を置き換えたので、9-3 の「notes.txt に記録のあるファイルは除外する」は録り直し後のファイルだけを使う、と読み替える。系統A・B は続けている。
