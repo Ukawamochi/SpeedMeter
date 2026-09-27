@@ -187,3 +187,7 @@ pyopenjtalkの実測に関する注記
 ### 2026-09-27 実環境評価の読み上げ文の再配布の条件（指示書 2026-09-27 系統C 9-1、作業は止めていない）
 
 1. 読み上げる20文（JSUT basic5000 の文そのもの）を Public リポジトリにコミットしてよいか。data/jsut/LICENCE.txt によると basic5000 のテキストは Wikipedia 由来（CC-BY-SA 3.0）・田中コーパス由来（CC-BY 2.0）・作成者の独自の文（CC-BY-SA 4.0）の混在で、文ごとの由来は示されていない（data/jsut-label も CC-BY-SA 4.0 など）。README_ja.txt の再配布の禁止は音声データについての記述で、テキストは表示と継承の条件のもとで再配布できると読めるが、リポジトリに LICENSE が無く、どの表示を付ければ条件を満たすかは人間の判断が要る。現状: sentences.txt・sentences_labeled.tsv は .gitignore で追跡せず、選び方と文IDだけを data/eval_scripts/selection.json としてコミットした（scripts/select_eval_sentences.py で同じ20文を再生成できる）。コミットするなら、ライセンスと出典の表示の置き方を指示してほしい
+
+### 2026-09-27 実際のクリップ1件の特徴量の値をリポジトリに入れてよいか（指示書 2026-09-27 系統B 8-2、作業は止めていない）
+
+1. docs/plan.md 8-2 は、合成サイン波に加えて「実際のクリップ1件」の対数メルの値を tests/fixtures/ に保存するよう求めている。Common Voice は再配布が禁止されているので音声は入れない。対数メル（80次元 × フレーム）は音声そのものではないが、元の音声の内容（話者の声の特徴、発話の内容のおおまかな形）をある程度復元できる派生データである。これを Public リポジトリにコミットしてよいか判断してほしい。現状: dev のクリップ common_voice_ja_19485242 の値を `scripts/make_melspec_fixtures.py --clip common_voice_ja_19485242 --clip-out runs/melspec_fixture_clip` でリポジトリ外（runs/melspec_fixture_clip/clip_common_voice_ja_19485242.json、約1.0MB）に書いただけで、コミットしていない。合成サイン波2件とメルフィルタバンクの参照値と照合テストはコミットした。入れてよい場合は、どの形で入れるか（全フレームか一部か、JSON か）も指示してほしい。入れない場合は、合成の信号だけで照合を済ませるか、再配布の条件が明らかな音源（利用者自身の録音など）を別に用意するかを指示してほしい
