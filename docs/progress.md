@@ -313,3 +313,8 @@
 
 ### 2026-09-27 実装: 指示書 2026-09-27 0節3（spec.md への D1 の雑音下の定義の追加）
 - spec.md「診断指標」の D1 の下に「D1 雑音下（補助）」を加えた（18cf405）。D1 と同じ1,000件のクリップ全体に dev_noisy の加工を掛け SNR 3条件で同じ手順で測る。閾値なし・B1〜B5 の判定に使わない。実装（9241a8c）との食い違いはなかった。
+
+### 2026-09-27 実装: 指示書 2026-09-27 系統C（9-1）
+- feat/record-eval（worktree SpeedMeter-wt-c）に、20文の選択 scripts/select_eval_sentences.py（JSUT basic5000、jsut-label kana_level0 で数えて20〜40モーラ、has_unconverted なし、pyopenjtalk と一致、種 20260927。候補3,081文から選び20〜39モーラ・平均27.9）と録音の道具 scripts/record_eval.py を作った。
+- 道具は Enter で開始・終了、r で録り直し（上書き）、q で終了、16kHz・モノラルで data/eval_real/{mic}_{rate}_{番号}_{文ID}.wav に保存。依存に sounddevice を追加（uv.lock は追加のみ）。手順書 data/eval_scripts/README.md。pytest 765 passed / 3 skipped（cuda）。
+- JSUT の文そのものは再配布の条件の確認まで追跡しない（questions.md に記録）。マージ後に main で select_eval_sentences.py を実行して文の一覧を作る必要がある。
