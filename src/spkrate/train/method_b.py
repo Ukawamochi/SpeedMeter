@@ -674,6 +674,43 @@ class WindowTrainDataset(Dataset):
             "rng": rng,
         }
 
+    def window_label(self, index: int) -> tuple[float, WindowPlan, WindowSource]:
+        """index 番目の窓の正解を、音声を読まずに求める（``window`` の ``mora`` と同じ値）。
+
+        正解はアライメント・伸縮率・窓の位置だけで決まる（011 4.2節の学習前の確認に使う）。
+        伸縮後の抜粋の長さは ``time_stretch`` と同じ ``round(抜粋長 · s)``（伸縮なしなら抜粋長）。
+        乱数は ``window`` と同じ生成器から伸縮の抽選 → 伸縮率 → 窓の位置 までを引く。
+
+        Returns:
+            (窓の正解モーラ数, 窓の取り方, 音源)
+        """
+        settings = self.settings
+        w_samples = settings.window_samples
+        source = self.source(index)
+        rng = np.random.default_rng((self.seed, self.epoch, index))
+        plan = draw_window_plan(
+            rng,
+            source.num_samples,
+            window_samples=w_samples,
+            margin_samples=settings.margin_samples,
+            augment=self.augment,
+        )
+        length = plan.excerpt_end - plan.excerpt_start
+        if plan.stretch != 1.0:
+            length = int(round(length * plan.stretch))
+        k = window_start_in_excerpt(plan.start, plan.excerpt_start, plan.stretch, length, w_samples)
+        starts, ends = self.source_moras(source)
+        label = stretched_window_label(
+            starts,
+            ends,
+            excerpt_start=plan.excerpt_start,
+            stretch=plan.stretch,
+            window_start=k,
+            window_sec=settings.window_sec,
+            sample_rate=settings.sample_rate,
+        )
+        return float(label), plan, source
+
     def __getitem__(self, index: int) -> ClipItem:
         info = self.window(index)
         rng = info["rng"]
