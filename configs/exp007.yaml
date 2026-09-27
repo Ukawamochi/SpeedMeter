@@ -1,0 +1,77 @@
+# exp005 と同じ設定で乱数の種だけを変えた再学習（学習ごとのばらつきの測定。
+# docs/directives/2026-09-27.md 系統A の A-1。ブランチ exp/012-seed-variance）。
+# ubuntu-desktop（cuda）で学習する。
+#
+# 実行（ubuntu-desktop の ~/SpeedMeter から）:
+#   ~/.local/bin/uv run --frozen python -m spkrate.train.train --config configs/exp007.yaml
+#
+# ## exp005（configs/exp005.yaml）との差分と理由
+#
+# 方式B（windows）・検証（dev_window_val）・学習クリップの一覧・MUSAN の学習用分割・拡張・無音サンプル・
+# モデル構造・損失・学習率・重み減衰・勾配の上限・バッチ(64)・num_workers(4)・bucketing(false)・
+# early_stopping_patience(5)・max_epochs(30)・best_metric は exp005 と同じ。違いは次の3つだけ。
+#
+# - seed: 20260921 → 20260929
+#     値の選び方: configs/・src/・scripts/ で乱数の種として既に使われている日付形式の値
+#     （20260920〜20260928）と重ならない値のうち、日付形式の慣例に従い最初の未使用の値 20260929 を
+#     選んだ。学習の結果を見る前に1回だけ決めた値で、選び直さない。
+#     種は重みの初期値・バッチの並び・拡張・無音サンプル（(seed, エポック, 件) から作る）に効く。
+#     検証窓の抽出（configs/eval/dev_window_val.yaml の 20260928）は事前計算済みで、変わらない。
+# - device: mps → cuda（ubuntu-desktop で学習する。float64・torch.compile・混合精度は使わず、
+#     TF32 は無効にする。src/spkrate/device.py）。このため exp005 との差には、種の差と計算機の差が
+#     混ざる（A-1 の記録 results/run_variance.md に明記する）。
+# - experiment_id と notes の文言。
+#
+# test.json は使わない。
+
+experiment_id: exp007
+seed: 20260929       # exp005 は 20260921。選び方は冒頭のコメント
+device: cuda         # CLAUDE.md「学習デバイスはmpsまたはcuda」。ubuntu-desktop で学習する
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: exp005 と同じ設定（方式B・学習クリップの絞り込み・MUSAN 学習用分割・拡張・無音サンプル）で、乱数の種だけを 20260929 に変え、cuda で学習する（学習ごとのばらつきの測定、A-1）。初期状態から、早期終了（patience 5、上限30）
+
+data:
+  source: windows                 # 方式B（spkrate.train.method_b）
+  dev_source: dev_window_val      # 検証は dev_window の抽出50,000窓（事前計算特徴量・拡張なし）
+  dev_window_val_dir: data/processed/dev_window_val
+  train_clip_list: data/processed/train_selection/usable_clip_ids.txt
+  train_alignments: data/processed/alignments/train.jsonl
+  clips_jsonl: data/processed/clips.jsonl
+  train_split: configs/splits/train.json   # test.json は使わない
+  max_train_clips: null  # 学習用の一覧の全件
+  max_dev_clips: null    # 検証窓の50,000窓全件で毎エポック評価する
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+windows:
+  window_sec: 2.0
+  margin_sec: 0.5
+  concat_group_size: [3, 5]      # configs/eval/dev_window.yaml と同じ
+  concat_gap_sec: [0.3, 1.5]
+  concat_gap_round_sec: 0.01
+
+augment:
+  enabled: true      # AugmentConfig の既定値（exp004 と同じ）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json   # MUSAN noise の学習用だけ
+
+silence_samples:
+  enabled: true      # それ以外は exp004 と同じ既定値（割合0.03、3種等分、-90〜-60dBFS、長さは学習入力＝2.0秒）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json
+
+train:
+  max_epochs: 30                  # 上限（初期状態からエポック1〜30）
+  early_stopping_patience: 5      # 検証の mae_moras_per_sec が5エポック連続で改善しなければ終了
+  batch_size: 64
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 4
+  bucketing: false   # 全件201フレームなので長さの整列はしない
+  best_metric: mae_moras_per_sec
+  log_interval: 200
+  # results/metrics.csv への追記は学習後の評価で行う。
+  record_metrics_csv: false
