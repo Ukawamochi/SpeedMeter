@@ -322,3 +322,7 @@
 ### 2026-09-27 統括: 系統C の停止（人間の録音 9-2 を待つ）
 - feat/record-eval を main にマージした（5d64e02）。main で select_eval_sentences.py を実行し、worktree と同じ20文（data/eval_scripts/、追跡外）を作った。手順書は data/eval_scripts/README.md。
 - 系統C は人間の録音を待って停止する。r キーでの録り直しで notes.txt を置き換えたので、9-3 の「notes.txt に記録のあるファイルは除外する」は録り直し後のファイルだけを使う、と読み替える。系統A・B は続けている。
+
+### 2026-09-27 測定: 指示書 2026-09-27 A-1（推論の計算機の差、exp007 の起動）
+- exp005 の checkpoint_best.pt（md5 一致）を ubuntu-desktop の cuda で dev_window clean について推論した（f949ef5、570秒）。主指標の MAE は mps 0.475469、cuda 0.475469（4桁で同じ）。窓ごとの予測の差は |差| の平均 1.3e-6、最大 3.8e-5 モーラ毎秒。metrics.csv に 012-compute-diff-exp005-cuda を追記（e939a27）。出力は runs/exp005_cuda_check/。
+- configs/exp007.yaml（exp/012-seed-variance の f949ef5。exp005 と seed 20260929・device cuda だけが違う）で、ubuntu-desktop の tmux で 14:27 に学習を起動した。
