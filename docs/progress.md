@@ -350,3 +350,7 @@
 ### 2026-09-28 測定: 指示書 2026-09-27 A-3 exp008 の起動（損失 mse → poisson）
 - exp/013-poisson-loss に configs/exp000_poisson_smoke_cuda.yaml（1ec6475）と configs/exp008.yaml（3914f67）を置いた。ubuntu の完走確認（先頭8192件・1エポック・267バッチ）で損失は有限のまま下がった（full=False のため負の値になる）。
 - exp008 を ubuntu-desktop（cuda）の tmux exp008 で 2026-09-28 00:14 に起動した（見込み約8時間15分）。docs/compute.md に記録。
+
+### 2026-09-28 測定: 指示書 2026-09-27 A-3 exp009（起動）
+- configs/exp009.yaml と configs/model/cnn_freq16.yaml（exp005 から周波数段のチャネル数だけ [32, 64, 64] → [16, 32, 32]）を exp/014-freq-ch-half に置いた（9e9de29）。パラメータ数 334,305（exp005 498,881）、積和 102.4 百万（239.5）、受容野 69 フレームで 011 の見込みと一致。
+- Mac の mps で 00:14 に学習を起動した（worktree SpeedMeter-wt-c から。出力は runs_dir を絶対パスにして元の runs/exp009）。
