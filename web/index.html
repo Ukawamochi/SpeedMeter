@@ -5,27 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SpeedMeter 確認用</title>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 16px; max-width: 960px; line-height: 1.5; }
-  button { font-size: 1rem; padding: 0.5em 1em; margin-right: 0.5em; }
-  pre { background: #f4f4f4; padding: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
-  table { border-collapse: collapse; }
-  td, th { border: 1px solid #ccc; padding: 2px 8px; text-align: right; }
-  .note { color: #a33; }
+  body { font-family: system-ui, sans-serif; margin: 16px; max-width: 960px; line-height: 1.5; background: #fff; color: #111; }
+  button { font-size: 1rem; padding: 0.5em 1em; }
+  #current { font-size: 4rem; font-weight: bold; font-variant-numeric: tabular-nums; margin: 0.2em 0 0; }
+  #current small { font-size: 1.2rem; font-weight: normal; }
+  canvas { width: 100%; height: 320px; display: block; border: 1px solid #ddd; }
+  .small { font-size: 0.8rem; color: #666; }
 </style>
 </head>
 <body>
 <h1>SpeedMeter 確認用ページ</h1>
-<p class="note">確認用（仕様の実装ではない）。モデル: models/model_fp32.onnx（exp005 の fp32）。
-  窓ごとの推論は docs/spec.md の定義（2.0秒窓・0.25秒ずらし・窓全体が収まるものだけ）に従う。
-  「クリップ全体を1回入力」は仕様に無い入力で、比較のための確認用の表示である。</p>
+<p class="small">確認用（仕様の実装ではない）。モデル: models/model_fp32.onnx（exp005 の fp32）。録音中は直近 2.0 秒の音声で
+  0.25 秒ごとに推論し、出力（モーラ数）÷ 2.0 秒を毎秒モーラ数として表示する（docs/spec.md の推論の定義）。
+  <a href="check.html">計算の照合（参照入力）</a></p>
 
-<p>
-  <button id="record">録音開始</button>
-  <button id="reference">参照入力で実行</button>
-</p>
-<p id="status">待機中</p>
+<p><button id="record">録音開始</button> <span id="status" class="small">待機中</span></p>
 
-<div id="result"></div>
+<p id="current">–.– <small>モーラ/秒</small></p>
+<canvas id="chart"></canvas>
+<p class="small">横軸: 直近 30 秒（右端がいま）。縦軸: 毎秒モーラ数。薄い破線（4・6・8）: 帯の境界（評価用）。早口の閾値は未定義。
+  値は加工せずにそのまま描く（平滑化なし。無音の表示の定義は仕様に無い）。</p>
+<p id="stats" class="small"></p>
 
 <script type="module" src="app.js"></script>
 </body>

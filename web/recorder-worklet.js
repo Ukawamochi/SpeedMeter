@@ -1,6 +1,6 @@
 // 確認用ページの録音（AudioWorklet）。入力の各ブロック（128 標本）をチャンネル平均で
 // モノラルにして、そのままの標本化周波数（AudioContext.sampleRate）で主スレッドへ送る。
-// 16kHz への再標本化は主スレッド（web/dsp.js の resampleSinc）で録音の停止後にまとめて行う。
+// 主スレッドは環形バッファに溜め、0.25 秒ごとに直近 2.0 秒を 16kHz へ変換して推論する（web/app.js）。
 class RecorderProcessor extends AudioWorkletProcessor {
   process(inputs) {
     const input = inputs[0];
