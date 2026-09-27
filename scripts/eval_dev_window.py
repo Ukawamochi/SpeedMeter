@@ -36,6 +36,19 @@
         --model-config configs/exp005.yaml --experiment-id 010-exp005-method-b \\
         --method-name "..." --append-metrics
 
+ONNX（第8段階 8-1）: ``predict --onnx <model.onnx>`` で、モデルの前向き計算を ONNX Runtime
+（CPU の実行プロバイダ）に替える（``spkrate.export.to_onnx.make_onnx_predictor``。正規化はグラフ内）。
+``--checkpoint`` は元のチェックポイント（best_epoch の記録用）を渡す。``summarize`` の
+``--conditions clean`` で clean だけを集計し（雑音下の行は書かない）、``--model-file`` で
+metrics.csv の model_size_bytes に ONNX ファイルの大きさを書く。例:
+    uv run python scripts/eval_dev_window.py predict --conditions clean \\
+        --out-dir runs/onnx_exp005/window_eval_int8 --model-key onnx_int8 \\
+        --checkpoint runs/exp005/checkpoint_best.pt --onnx runs/onnx_exp005/model_int8.onnx --no-envelope
+    uv run python scripts/eval_dev_window.py summarize --conditions clean \\
+        --out-dir runs/onnx_exp005/window_eval_int8 --model-key onnx_int8 \\
+        --checkpoint runs/exp005/checkpoint_best.pt --model-file runs/onnx_exp005/model_int8.onnx \\
+        --no-envelope --model-config configs/exp005.yaml --experiment-id ... --method-name ... --append-metrics
+
 configs/splits/test.json は使わない。data/ 以下は読むだけ。
 
 実行（リポジトリ直下から）:
@@ -137,11 +150,27 @@ def cmd_predict(args: argparse.Namespace) -> int:
 
     from spkrate.device import setup_device, synchronize
 
-    device, device_record = setup_device(args.device, logger)
     model, payload = load_checkpoint(str(_resolve(args.checkpoint)), map_location="cpu")
-    model = model.to(device).eval()
-    normalizer = load_normalization(_resolve(NORMALIZATION))
-    predict = make_predictor(model, normalizer, device, batch_size=args.batch_size)
+    if args.onnx:
+        import onnxruntime
+
+        from spkrate.device import host_label
+        from spkrate.export.to_onnx import make_onnx_predictor, make_session
+
+        # ONNX Runtime は CPU の実行プロバイダだけを使う。torch のデバイスは使わない。
+        device = torch.device("cpu")
+        session = make_session(_resolve(args.onnx), intra_op_threads=args.onnx_threads)
+        device_record = {"host_label": host_label(), "runtime": "onnxruntime",
+                         "onnxruntime": onnxruntime.__version__, "providers": session.get_providers(),
+                         "intra_op_threads": args.onnx_threads, "onnx": args.onnx}
+        logger.info("onnxruntime %s providers=%s onnx=%s", onnxruntime.__version__,
+                    session.get_providers(), args.onnx)
+        predict = make_onnx_predictor(session, batch_size=args.batch_size)
+    else:
+        device, device_record = setup_device(args.device, logger)
+        model = model.to(device).eval()
+        normalizer = load_normalization(_resolve(NORMALIZATION))
+        predict = make_predictor(model, normalizer, device, batch_size=args.batch_size)
     envelope = None if args.no_envelope else EnvelopeSpeedEstimator(load_params(_resolve(ENVELOPE_CONFIG)))
     methods = method_keys(args)
     log(f"device={device} checkpoint={args.checkpoint} best_epoch={payload['epoch']} "
@@ -301,7 +330,11 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     config = load_window_config(_resolve(CONFIG))
     ws = load_dev_window(_resolve(config.output_dir))
     out_dir = _resolve(args.out_dir)
-    conditions = condition_names(config)
+    conditions = condition_names(config) if args.conditions is None else args.conditions.split(",")
+    if conditions[0] != "clean" or not set(conditions) <= set(condition_names(config)):
+        raise SystemExit(f"--conditions は clean から始まる {condition_names(config)} の部分列: {conditions}")
+    noisy_names = conditions[1:]
+    with_noisy_all = noisy_names == condition_names(config)[1:]
     methods = method_keys(args)
     experiment_ids = {**EXPERIMENT_IDS, args.model_key: args.experiment_id or EXPERIMENT_IDS.get(args.model_key)}
     method_names = {**METHOD_NAMES, args.model_key: args.method_name or METHOD_NAMES.get(args.model_key)}
@@ -353,8 +386,8 @@ def cmd_summarize(args: argparse.Namespace) -> int:
                 entry[scope] = block
             summary["results"][f"{name}/{method}"] = entry
 
-    # 雑音下3条件のまとめ
-    for method in methods:
+    # 雑音下3条件のまとめ（3条件がそろうときだけ）
+    for method in (methods if with_noisy_all else ()):
         entry = {}
         for scope, base in (("main", keep), ("unfiltered", np.ones(len(ws), dtype=bool))):
             t = np.concatenate([true[base]] * 3)
@@ -406,7 +439,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     log(f"summary written: {out_dir / 'summary.json'}")
 
     if args.append_metrics:
-        size = model_size_bytes(_resolve(args.checkpoint))
+        size = model_size_bytes(_resolve(args.model_file or args.checkpoint))
         # host・device 列: exp004 は予測を作った計算機とデバイス（predict_meta.json）、包絡は cpu。
         meta_path = out_dir / "predict_meta.json"
         meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
@@ -424,9 +457,10 @@ def cmd_summarize(args: argparse.Namespace) -> int:
                 if name != "clean":
                     parts_t.append(true[keep])
                     parts_p.append(p)
-            pooled = compute_metrics(np.concatenate(parts_t).tolist(), np.concatenate(parts_p).tolist(),
-                                     [W_SEC] * int(keep.sum()) * len(parts_t))
-            rows.append(("dev_window_noisy_all", pooled))
+            if with_noisy_all:
+                pooled = compute_metrics(np.concatenate(parts_t).tolist(), np.concatenate(parts_p).tolist(),
+                                         [W_SEC] * int(keep.sum()) * len(parts_t))
+                rows.append(("dev_window_noisy_all", pooled))
             config_path = f"{method_configs[method]};{CONFIG};{NO_SPEECH_CONFIG}"
             is_model = method == args.model_key
             for split, metrics in rows:
@@ -455,12 +489,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=20260926)
     p.add_argument("--device", default="mps",
                    help="mps・cuda・cpu（既定 mps）。使えない場合は開始前に止める")
+    p.add_argument("--onnx", default=None,
+                   help="ONNX のモデル（第8段階）。与えると ONNX Runtime の CPU 実行で推論する")
+    p.add_argument("--onnx-threads", type=int, default=None,
+                   help="ONNX Runtime の intra_op_num_threads（省略時は ONNX Runtime の既定）")
     s = sub.add_parser("summarize")
     s.add_argument("--out-dir", default=OUT_DIR)
     s.add_argument("--append-metrics", action="store_true")
     s.add_argument("--model-config", default=MODEL_CONFIG, help="metrics.csv の config_path に書くモデルの設定")
     s.add_argument("--experiment-id", default=None, help="metrics.csv の実験ID（既定は exp004 の値）")
     s.add_argument("--method-name", default=None, help="metrics.csv の method（既定は exp004 の値）")
+    s.add_argument("--conditions", default=None,
+                   help="集計する条件（clean から始まる部分列。既定はすべて。3条件そろわなければ雑音下まとめを省く）")
+    s.add_argument("--model-file", default=None,
+                   help="metrics.csv の model_size_bytes に大きさを書くファイル（既定は --checkpoint）")
     for q in (p, s):
         q.add_argument("--model-key", default="exp004", help="予測の配列名（npz のキー）")
         q.add_argument("--checkpoint", default=CHECKPOINT)
