@@ -375,3 +375,7 @@
 - exp009 は 011 2.3節の「精度を保つ」の L2・L3・L4 を満たさなかったため、011 の規則どおり exp013（周波数段 [8,16,16]）は行わない。
 - Mac が空いたので、011 で ubuntu に割り当てた exp012（時間段 64）を mac（mps）で学習する（指示書 A-3 の「Mac で1条件を並行して学習してよい」）。ubuntu は exp010 の後に exp011 を行う。exp012 は exp005 と同じ計算機になり、差は条件と（exp007 との比較では）seed だけになる。
 - exp009 の設定の runs_dir にあったユーザー名を含む絶対パスと、results/lr_schedule.md の絶対パスを、相対パスに直した（2428968、b356a51）。
+
+### 2026-09-28 測定: 指示書 2026-09-27 A-3 exp012 の起動（時間段のチャネル 128 → 64）
+- configs/exp012.yaml と configs/model/cnn_tch64.yaml（exp005 から temporal_channels だけ [128×5] → [64×5]）を exp/017-temporal-ch-half に置いた（76a4b52）。パラメータ数 228,161（exp005 498,881）、積和 185.1 百万（239.5）、受容野 69 フレームで 011 の見込みと一致。
+- Mac の mps で 12:32 に学習を起動した（worktree SpeedMeter-wt-c から nohup。出力は worktree の runs/exp012、runs_dir は runs のまま）。docs/compute.md に記録。
