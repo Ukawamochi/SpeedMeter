@@ -11,6 +11,12 @@ exp010（時間伸縮の伸縮率を対数一様にする）の学習の前に�
 - ``--distribution`` を複数与えると、同じ窓の番号でそれぞれの分布の値を出す
   （設定ファイルの ``augment.time_stretch_distribution`` を上書きする）
 - configs/splits/test.json は使わない（学習用の一覧と train.json だけを読む）
+- 高速度域（docs/directives/2026-09-28-fast-speech.md タスク2）: 毎秒10・12・14モーラ以上の窓の割合と、
+  伸縮した窓の伸縮率の実際の分布（倍率1未満の割合、0.1刻みの区間の割合、方式Bの下限
+  max(範囲の下限, 2.0 ÷ 音源長) が範囲の下限より上がった＝下限で切られた割合）を出す。
+  ``--stretch-range`` で設定ファイルの ``augment.time_stretch_range`` を上書きできる（例 0.5 1.5）。
+  名目の割合（下限で切られない場合の分布の値）も並べて出すので、4秒未満の音源で2倍速に近い
+  伸縮が使えないことによる減り方が分かる
 
 実行例:
     uv run python scripts/epoch_window_label_distribution.py --config configs/exp005.yaml \\
@@ -31,10 +37,72 @@ import numpy as np
 
 from spkrate.eval.dev_window import KIND_CONCAT, KIND_SINGLE
 from spkrate.eval.metrics import SPEED_BANDS, band_of
-from spkrate.train.method_b import WindowTrainDataset, load_train_clips, read_clip_list
+from spkrate.train.method_b import (
+    WindowTrainDataset,
+    load_train_clips,
+    read_clip_list,
+    stretch_lower_bound,
+)
 from spkrate.train.train import load_train_config
 
 FAST_MORA = 16.0  # 2.0秒窓で毎秒8モーラ
+HIGH_RATES = (10.0, 12.0, 14.0)  # 高速度域の集計の閾値（毎秒モーラ数。指示書 2026-09-28-fast-speech）
+STRETCH_EDGES = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5)  # 伸縮率の区間（左閉右開、最後は両端を含む）
+
+
+def nominal_stretch_cdf(x: float, low: float, high: float, distribution: str) -> float:
+    """下限で切られない場合の伸縮率の分布の累積 P(s < x)（[low, high] の一様か対数一様）。"""
+    if x <= low:
+        return 0.0
+    if x >= high:
+        return 1.0
+    if distribution == "log_uniform":
+        return float(np.log(x / low) / np.log(high / low))
+    return float((x - low) / (high - low))
+
+
+def summarize_stretch(
+    stretches: np.ndarray,
+    drawn: np.ndarray,
+    cut: np.ndarray,
+    low: float,
+    high: float,
+    distribution: str,
+) -> dict[str, Any]:
+    """伸縮の抽選に当たった窓の伸縮率の実際の分布と、名目の分布（下限で切られない場合）。
+
+    Args:
+        stretches: 窓ごとの伸縮率（伸縮しなければ1.0）
+        drawn: 伸縮の抽選に当たったか
+        cut: 方式Bの下限 max(low, 2.0 ÷ 音源長) が low より上がったか（抽選の有無によらず音源で決まる）
+    """
+    s = stretches[drawn]
+    m = int(s.size)
+    out: dict[str, Any] = {
+        "range": [float(low), float(high)],
+        "distribution": distribution,
+        "stretched": m,
+        "below1": float(np.mean(s < 1.0)) if m else float("nan"),
+        "below1_nominal": nominal_stretch_cdf(1.0, low, high, distribution),
+        "cut_by_lower_bound": float(np.mean(cut[drawn])) if m else float("nan"),
+        "bins": {},
+    }
+    edges = [e for e in STRETCH_EDGES if low - 1e-9 <= e <= high + 1e-9]
+    if not edges or edges[0] > low + 1e-9:
+        edges = [float(low)] + edges
+    if edges[-1] < high - 1e-9:
+        edges = edges + [float(high)]
+    for i in range(len(edges) - 1):
+        lo, hi = edges[i], edges[i + 1]
+        last = i == len(edges) - 2
+        mask = (s >= lo) & ((s <= hi) if last else (s < hi))
+        key = f"{lo:.1f}-{hi:.1f}"
+        out["bins"][key] = {
+            "actual": float(np.mean(mask)) if m else float("nan"),
+            "nominal": nominal_stretch_cdf(hi, low, high, distribution)
+            - nominal_stretch_cdf(lo, low, high, distribution),
+        }
+    return out
 
 
 def summarize(labels: np.ndarray, kinds: list[str], stretches: np.ndarray, window_sec: float) -> dict[str, Any]:
@@ -46,6 +114,7 @@ def summarize(labels: np.ndarray, kinds: list[str], stretches: np.ndarray, windo
         "windows": n,
         "fast_ratio": float(np.mean(labels >= FAST_MORA)) if n else float("nan"),
         "fast_count": int(np.sum(labels >= FAST_MORA)),
+        **{f"rate_ge{int(r)}": float(np.mean(rates >= r)) if n else float("nan") for r in HIGH_RATES},
         "bands": {key: bands.get(key, 0) / n for key, _, _ in SPEED_BANDS},
         "mean_mora": float(np.mean(labels)) if n else float("nan"),
         "stretched_ratio": float(np.mean(stretches != 1.0)) if n else float("nan"),
@@ -71,6 +140,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="time_stretch_distribution を上書きして比べる（既定は設定ファイルの値のみ）",
     )
+    parser.add_argument(
+        "--stretch-range",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("LOW", "HIGH"),
+        help="augment.time_stretch_range を上書きする（例 0.5 1.5。exp014 の見積もり）",
+    )
     parser.add_argument("--json", default=None, help="結果を JSON で書く先")
     args = parser.parse_args(argv)
 
@@ -78,6 +155,10 @@ def main(argv: list[str] | None = None) -> int:
     if config.data.source != "windows":
         raise SystemExit(f"data.source=windows の設定だけを扱う: {config.data.source}")
     augment = config.augment.build()
+    if args.stretch_range is not None:
+        if augment is None:
+            raise SystemExit("拡張が無効の設定では --stretch-range を使えない")
+        augment = replace(augment, time_stretch_range=(args.stretch_range[0], args.stretch_range[1]))
     started = time.perf_counter()
     clip_ids = read_clip_list(config.data.train_clip_list)
     clips, starts, ends = load_train_clips(
@@ -114,19 +195,27 @@ def main(argv: list[str] | None = None) -> int:
         "total_windows": total,
         "sampled": int(indices.size),
         "sample_seed": args.sample_seed,
+        "stretch_range": None if augment is None else list(augment.time_stretch_range),
         "by_distribution": {},
     }
     for name in distributions:
         dataset.augment = None if augment is None else replace(augment, time_stretch_distribution=name)
         labels = np.empty(indices.size, dtype=np.float32)
         stretches = np.empty(indices.size, dtype=np.float32)
+        drawn = np.zeros(indices.size, dtype=bool)
+        cut = np.zeros(indices.size, dtype=bool)
         kinds: list[str] = []
+        w = config.windows.window_samples
+        low, high = (float(v) for v in (augment.time_stretch_range if augment else (1.0, 1.0)))
         for j, index in enumerate(indices):
             label, plan, source = dataset.window_label(int(index))
             labels[j] = label
             stretches[j] = plan.stretch
+            drawn[j] = plan.stretch_drawn
+            cut[j] = stretch_lower_bound(low, source.num_samples, w) > low
             kinds.append(source.kind)
         summary = summarize(labels, kinds, stretches, config.windows.window_sec)
+        summary["stretch"] = summarize_stretch(stretches, drawn, cut, low, high, name)
         results["by_distribution"][name] = summary
         bands = " ".join(f"{k}={v:.4f}" for k, v in summary["bands"].items())
         print(
@@ -134,6 +223,17 @@ def main(argv: list[str] | None = None) -> int:
             f"{summary['fast_ratio_single']:.4f}・連結 {summary['fast_ratio_concat']:.4f}） 帯: {bands} "
             f"平均={summary['mean_mora']:.3f}モーラ 伸縮の割合={summary['stretched_ratio']:.3f} "
             f"伸縮のうち s<1={summary['stretch_below1_among_stretched']:.3f}",
+            flush=True,
+        )
+        high_text = " ".join(f"{int(r)}以上={summary[f'rate_ge{int(r)}']:.4f}" for r in HIGH_RATES)
+        st = summary["stretch"]
+        bins_text = " ".join(
+            f"{k}={v['actual']:.4f}(名目{v['nominal']:.4f})" for k, v in st["bins"].items()
+        )
+        print(
+            f"  毎秒モーラ数 {high_text} ｜ 伸縮率 範囲={st['range']} 伸縮した窓={st['stretched']} "
+            f"s<1={st['below1']:.4f}(名目{st['below1_nominal']:.4f}) "
+            f"下限で切られた={st['cut_by_lower_bound']:.4f} 区間: {bins_text}",
             flush=True,
         )
     if args.json:
