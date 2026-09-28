@@ -7,11 +7,14 @@ import { resampleSinc } from '../dsp.js';
 import {
   BAND_BOUNDARIES,
   InferenceScheduler,
+  SERIES_COLORS,
   RingBuffer,
   extractWindow16k,
   makeScale,
   nativeWindowLength,
   pruneHistory,
+  seriesColor,
+  visibleValues,
   yAxisMax,
 } from '../realtime.js';
 
@@ -106,4 +109,22 @@ test('履歴の刈り込み: 範囲外の直前の1点だけを残す', () => {
 
 test('補助線は評価の話速帯の境界 4・6・8', () => {
   assert.deepEqual(BAND_BOUNDARIES, [4, 6, 8]);
+});
+
+test('系列の色: 一覧の順に固定で割り当て、8 個を超えると例外', () => {
+  assert.equal(SERIES_COLORS.length, 8);
+  assert.equal(new Set(SERIES_COLORS).size, 8);
+  assert.equal(seriesColor(0), '#2a78d6');
+  assert.equal(seriesColor(7), SERIES_COLORS[7]);
+  assert.throws(() => seriesColor(8), RangeError);
+  assert.throws(() => seriesColor(-1), RangeError);
+});
+
+test('表示中の系列の値: チェックした系列だけを集め、縦軸の上限もそれで決まる', () => {
+  const histories = { a: [{ t: 0, v: 3 }, { t: 1, v: 5 }], b: [{ t: 0, v: 13 }], c: [] };
+  assert.deepEqual(visibleValues(histories, ['a']), [3, 5]);
+  assert.deepEqual(visibleValues(histories, ['a', 'b', 'c', 'missing']), [3, 5, 13]);
+  assert.deepEqual(visibleValues(histories, []), []);
+  assert.equal(yAxisMax(visibleValues(histories, ['a'])), 10);
+  assert.equal(yAxisMax(visibleValues(histories, ['a', 'b'])), 14);
 });

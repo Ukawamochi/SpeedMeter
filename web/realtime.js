@@ -116,6 +116,22 @@ export function makeScale({ width, height, left, right, top, bottom, spanSec, no
   };
 }
 
+// 系列（モデル）の色。一覧（web/models/models.json）の順に固定で割り当て、表示の切り替えで塗り替えない。
+// 8 色を超える一覧は scripts/setup_web_model.py が拒む。
+export const SERIES_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
+
+export function seriesColor(index) {
+  if (!(index >= 0 && index < SERIES_COLORS.length)) throw new RangeError(`系列の色は ${SERIES_COLORS.length} 個まで: ${index}`);
+  return SERIES_COLORS[index];
+}
+
+// 表示中の系列の値をまとめる（縦軸の上限を表示中の系列だけで決めるため）。histories: { id: [{ t, v }] }
+export function visibleValues(histories, visibleIds) {
+  const values = [];
+  for (const id of visibleIds) for (const p of histories[id] ?? []) values.push(p.v);
+  return values;
+}
+
 // 縦軸の上限: 既定 10 モーラ/秒。表示範囲の値がそれを超えたら 2 刻みで切り上げる。
 export function yAxisMax(values, minMax = 10) {
   let max = minMax;
