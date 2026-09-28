@@ -338,7 +338,7 @@ def test_non_bool_flag_stops() -> None:
 @pytest.mark.parametrize(
     "params",
     [
-        {"time_stretch_range": [0.6, 1.5]},
+        {"time_stretch_range": [0.4, 1.5]},  # spec の許す最大（0.5〜1.5倍）の外
         {"time_stretch_range": [0.7, 1.6]},
         {"time_stretch_range": [0.5, 2.0]},
         {"snr_db_range": [-5.0, 20.0]},
@@ -355,6 +355,8 @@ def test_out_of_spec_range_stops(tmp_path: Path, musan: Path, params: dict[str, 
     "params",
     [
         {"time_stretch_range": [0.7, 1.5]},  # 両端を含む
+        {"time_stretch_range": [0.5, 1.5]},  # 新しい実験の設定で使ってよい範囲（両端を含む）
+        {"time_stretch_range": [0.6, 1.5]},
         {"time_stretch_range": [0.8, 1.2]},  # 内側への狭めは許す
         {"snr_db_range": [0.0, 20.0]},
         {"snr_db_range": [5.0, 15.0]},
