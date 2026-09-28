@@ -379,3 +379,7 @@
 ### 2026-09-28 測定: 指示書 2026-09-27 A-3 exp012 の起動（時間段のチャネル 128 → 64）
 - configs/exp012.yaml と configs/model/cnn_tch64.yaml（exp005 から temporal_channels だけ [128×5] → [64×5]）を exp/017-temporal-ch-half に置いた（76a4b52）。パラメータ数 228,161（exp005 498,881）、積和 185.1 百万（239.5）、受容野 69 フレームで 011 の見込みと一致。
 - Mac の mps で 12:32 に学習を起動した（worktree SpeedMeter-wt-c から nohup。出力は worktree の runs/exp012、runs_dir は runs のまま）。docs/compute.md に記録。
+
+### 2026-09-28 実装: 確認用ページで複数のモデルを比較（ユーザーの指示）
+- feat/web-demo の web/ を、models/models.json に並べた全モデル（setup_web_model.py --source で複数指定、8個まで）に同じ対数メルを通す形にした。グラフの上のチェックボックスで表示するモデルを切り替える（色は一覧の順に固定、値は平滑化なし）。
+- ヘッドレス Chrome（疑似マイク）で exp005・exp009 の2本の表示と切り替え、check.html の照合 OK を確認（2モデル合計 約80〜140 ms、間引き0）。node:test 25件、tests/test_web_demo.py 5件通過。実マイクでの確認は人間が行う。
