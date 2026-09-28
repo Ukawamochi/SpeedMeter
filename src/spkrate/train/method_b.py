@@ -90,6 +90,7 @@ SAMPLE_RATE = 16000
 CONCAT_SEED_TAG = 0xC0CA7  # 連結の組の作成の種に入れる印（009 1.3節）
 CONCAT_PICK_TAG = 0x5E1EC7  # 組の非復元抽出の種に入れる印（009 1.3節）
 FAST_REDRAW_TAG = 0xFA57  # 速い窓の選び直しの種に入れる印（011-fast-window-sampling）
+HIGH_RATE_THRESHOLDS = (10.0, 12.0, 14.0)  # エポックの集計に数える毎秒モーラ数の閾値
 
 
 # --------------------------------------------------------------------------------------
@@ -882,6 +883,8 @@ class WindowEpochStats:
     stretch_max: float = -math.inf
     zero: int = 0
     bands: Counter = field(default_factory=Counter)
+    # 毎秒10・12・14モーラ以上の窓の件数（高速度域。docs/directives/2026-09-28-fast-speech.md）
+    high: Counter = field(default_factory=Counter)
     total: int = 0
 
     def update(
@@ -906,7 +909,11 @@ class WindowEpochStats:
                 self.stretch_max = max(self.stretch_max, float(s))
             if float(m) == 0.0:
                 self.zero += 1
-            self.bands[band_of(float(m) / float(d))] += 1
+            rate = float(m) / float(d)
+            self.bands[band_of(rate)] += 1
+            for threshold in HIGH_RATE_THRESHOLDS:
+                if rate >= threshold:
+                    self.high[threshold] += 1
 
     def as_dict(self) -> dict[str, Any]:
         from spkrate.eval.metrics import BAND_KEYS
@@ -923,6 +930,7 @@ class WindowEpochStats:
             "window_zero": self.zero,
             "window_zero_rate": self.zero / total if total else float("nan"),
             **{f"window_band_{b}": int(self.bands.get(b, 0)) for b in BAND_KEYS},
+            **{f"window_rate_ge{int(t)}": int(self.high.get(t, 0)) for t in HIGH_RATE_THRESHOLDS},
         }
 
     def describe(self, epoch: int) -> str:
@@ -933,5 +941,6 @@ class WindowEpochStats:
             f"伸縮率(平均/最小/最大)={d['window_stretch_mean']:.3f}/{d['window_stretch_min']:.3f}/"
             f"{d['window_stretch_max']:.3f} 正解0の窓={d['window_zero']}({d['window_zero_rate']:.4f}) "
             f"帯別(<4/4-6/6-8/>=8)={d['window_band_under4']}/{d['window_band_4to6']}/"
-            f"{d['window_band_6to8']}/{d['window_band_over8']}"
+            f"{d['window_band_6to8']}/{d['window_band_over8']} "
+            f"毎秒10/12/14以上={d['window_rate_ge10']}/{d['window_rate_ge12']}/{d['window_rate_ge14']}"
         )
