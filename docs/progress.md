@@ -391,3 +391,7 @@
 ### 2026-09-28 実装: 指示書 2026-09-28-fast-speech 0節1・タスク2（伸縮の範囲と速い窓の選び方）
 - spec.md に「時間伸縮は既定0.7〜1.5倍、新しい実験の設定で0.5〜1.5倍を使ってよい」を加え、範囲の検査を0.5まで許した（既定値と既存の乱数の系列は不変）。exp015 用に windows.fast_window_redraws（伸縮した遅い窓の伸縮率だけを最大K回引き直す。既定0）を加え、決定記録 docs/decisions/011-fast-window-sampling.md（推奨 K=3）を書いた。
 - エポック1の20,000窓で毎秒10/12/14以上: exp005 5.3/1.2/0.3%、exp014 10.5/4.2/1.8%、exp015(K=3) 18.8/7.6/2.9%。pytest 820件通過。ブランチ feat/fast-speech-train（未マージ）。
+
+### 2026-09-28 実装: 指示書 2026-09-28-fast-speech タスク1（高速度域の評価）
+- 評価1（dev_window clean・主指標の正解の話速1刻みの区間別、既存の pred_clean.npz を再利用）と評価2（dev_fast）の集計を scripts/eval_fast_speech.py（predict/summarize、mps・cuda）に、dev_fast の作成を scripts/build_dev_fast.py に置いた。速める方式は WSOLA（audiotsm 0.1.2、依存に追加。学習の位相ボコーダとは別）。
+- dev_fast: dev_window の2,000音源（種 202609281、連続発話の組722を含む）を作成し data/processed/dev_fast/ に置いた。窓数 x1.5 46,761・x2 31,346（主指標 45,797・30,684）。記録 results/dev_fast_build.md。pytest 812件通過。ブランチ feat/fast-speech-eval（未マージ）。
