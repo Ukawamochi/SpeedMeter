@@ -1020,6 +1020,13 @@ def _build_window_dataset(
         dataset.stats["clips_unused_too_few"],
         dataset.group_stats,
     )
+    if config.windows.fast_window_redraws > 0:
+        log.info(
+            "方式B: 速い窓の選び直し 有効（伸縮した窓の正解が毎秒%gモーラ未満なら伸縮率だけを最大%d回"
+            "引き直す。窓の相対位置は保つ。docs/decisions/011-fast-window-sampling.md）",
+            config.windows.fast_window_min_rate,
+            config.windows.fast_window_redraws,
+        )
     return dataset
 
 
