@@ -1,0 +1,74 @@
+# exp005 と時間段のチャネル数だけが違う設定（第7段階の条件探索、軽さの条件。
+# docs/directives/2026-09-27.md 系統A の A-3、docs/experiments/011-search-plan.md の exp012。
+# ブランチ exp/017-temporal-ch-half）。mac（mps）で学習する（011 では ubuntu・cuda に割り当てていたが、
+# 統括の判断で Mac で学習する。docs/progress.md「A-3 の進め方の変更」）。
+#
+# 実行（Mac の worktree から）:
+#   PYTORCH_ENABLE_MPS_FALLBACK=1 uv run --frozen python -m spkrate.train.train --config configs/exp012.yaml
+#
+# ## exp005（configs/exp005.yaml）との差分と理由
+#
+# 方式B（windows）・検証（dev_window_val）・学習クリップの一覧・MUSAN の学習用分割・拡張・無音サンプル・
+# 損失・学習率・重み減衰・勾配の上限・バッチ(64)・num_workers(4)・bucketing(false)・
+# early_stopping_patience(5)・max_epochs(30)・best_metric・seed(20260921)・device(mps)・runs_dir(runs)
+# は exp005 と同じ。違いは次の2つだけ。
+#
+# - model_config: configs/model/cnn_base.yaml → configs/model/cnn_tch64.yaml
+#     時間段のチャネル数 [128, 128, 128, 128, 128] → [64, 64, 64, 64, 64]（それ以外の構造は cnn_base と同じ）。
+#     ブラウザで常時動かすための軽さの条件（011 1.2節: パラメータ数 −54%、積和の回数 −23% の見込み）。
+#     011 3節では device を cuda にするとしていたが、Mac で学習するため mps のまま（exp005 と同じ）。
+# - experiment_id と notes の文言。
+#
+# test.json は使わない。
+
+experiment_id: exp012
+seed: 20260921
+device: mps          # CLAUDE.md「学習デバイスはmps」
+runs_dir: runs
+model_config: configs/model/cnn_tch64.yaml   # exp005 は cnn_base.yaml。時間段 [64, 64, 64, 64, 64]
+notes: exp005 と同じ設定（方式B・学習クリップの絞り込み・MUSAN 学習用分割・拡張・無音サンプル・seed）で、時間段のチャネル数だけを [64, 64, 64, 64, 64] に半分にする（軽さの条件、011 の exp012）。mps で学習。初期状態から、早期終了（patience 5、上限30）
+
+data:
+  source: windows                 # 方式B（spkrate.train.method_b）
+  dev_source: dev_window_val      # 検証は dev_window の抽出50,000窓（事前計算特徴量・拡張なし）
+  dev_window_val_dir: data/processed/dev_window_val
+  train_clip_list: data/processed/train_selection/usable_clip_ids.txt
+  train_alignments: data/processed/alignments/train.jsonl
+  clips_jsonl: data/processed/clips.jsonl
+  train_split: configs/splits/train.json   # test.json は使わない
+  max_train_clips: null  # 学習用の一覧の全件
+  max_dev_clips: null    # 検証窓の50,000窓全件で毎エポック評価する
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+windows:
+  window_sec: 2.0
+  margin_sec: 0.5
+  concat_group_size: [3, 5]      # configs/eval/dev_window.yaml と同じ
+  concat_gap_sec: [0.3, 1.5]
+  concat_gap_round_sec: 0.01
+
+augment:
+  enabled: true      # AugmentConfig の既定値（exp004 と同じ）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json   # MUSAN noise の学習用だけ
+
+silence_samples:
+  enabled: true      # それ以外は exp004 と同じ既定値（割合0.03、3種等分、-90〜-60dBFS、長さは学習入力＝2.0秒）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json
+
+train:
+  max_epochs: 30                  # 上限（初期状態からエポック1〜30）
+  early_stopping_patience: 5      # 検証の mae_moras_per_sec が5エポック連続で改善しなければ終了
+  batch_size: 64
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 4
+  bucketing: false   # 全件201フレームなので長さの整列はしない
+  best_metric: mae_moras_per_sec
+  log_interval: 200
+  # results/metrics.csv への追記は学習後の評価で行う。
+  record_metrics_csv: false
