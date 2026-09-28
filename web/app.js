@@ -8,9 +8,13 @@
 //   → 毎秒モーラ数 = モーラ数 ÷ 2.0 秒。推論が次の時点に間に合わなければその時点は間引く（web/realtime.js）。
 // 早口の閾値は仕様に無いので決めていない（docs/questions.md）。グラフには評価の話速帯の境界（4・6・8）を
 // 薄く引くだけにする。値は平滑化せずそのまま描く。
+//
+// 複数のモデルを比べる: web/models/models.json の全モデルに、時点ごとに同じ対数メルを順に通す（推論は
+// チェックの有無によらず全モデルで行い、チェックは表示だけを切り替える。途中でチェックを付けても線が欠けない）。
+// 推論の時間は全モデルの合計になり、0.25 秒に間に合わなければ全モデルそろって間引く。
 
 import { WINDOW_SEC, logMelSpectrogram } from './dsp.js';
-import { createSession, ort } from './model.js';
+import { createSession, loadManifest, ort } from './model.js';
 import {
   BAND_BOUNDARIES,
   InferenceScheduler,
@@ -18,6 +22,8 @@ import {
   extractWindow16k,
   makeScale,
   pruneHistory,
+  seriesColor,
+  visibleValues,
   yAxisMax,
 } from './realtime.js';
 
@@ -29,15 +35,70 @@ const statusEl = document.getElementById('status');
 const currentEl = document.getElementById('current');
 const statsEl = document.getElementById('stats');
 const canvas = document.getElementById('chart');
+const modelsEl = document.getElementById('models');
 
-let sessionPromise = null;
+const manifestPromise = loadManifest();
+let sessionsPromise = null;
+let models = []; // { id, file, color, visible, checkbox }（一覧の順）
 let rec = null; // 録音中の状態
-let history = []; // { t: 窓の終わりの時刻（録音開始からの秒）, v: 毎秒モーラ数 }
+let histories = {}; // id → [{ t: 窓の終わりの時刻（録音開始からの秒）, v: 毎秒モーラ数 }]
 let nowSec = 0;
 
-function getSession() {
-  if (sessionPromise === null) sessionPromise = createSession();
-  return sessionPromise;
+function getSessions() {
+  if (sessionsPromise === null) {
+    sessionsPromise = manifestPromise.then((list) => Promise.all(list.map((m) => createSession(m.file))));
+  }
+  return sessionsPromise;
+}
+
+function visibleModels() {
+  return models.filter((m) => m.visible);
+}
+
+function clearHistories() {
+  histories = Object.fromEntries(models.map((m) => [m.id, []]));
+}
+
+// ---- モデルの切り替え（グラフの上のチェックボックス） ----------------------------------
+
+function buildModelToggles(list) {
+  models = list.map((m, i) => ({ ...m, color: seriesColor(i), visible: true }));
+  clearHistories();
+  modelsEl.replaceChildren(...models.map((m) => {
+    const label = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = m.visible;
+    checkbox.addEventListener('change', () => {
+      m.visible = checkbox.checked;
+      showCurrent();
+      draw();
+    });
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = m.color;
+    label.append(checkbox, swatch, document.createTextNode(m.id));
+    return label;
+  }));
+}
+
+// モデルごとの現在値（最新の点の値をそのまま）。チェックを外したモデルは行を残して薄くする（グラフの位置を動かさない）
+function showCurrent() {
+  currentEl.replaceChildren(...models.map((m) => {
+    const points = histories[m.id] ?? [];
+    const value = points.length > 0 ? points[points.length - 1].v.toFixed(2) : '–.–';
+    const row = document.createElement('div');
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = m.color;
+    const name = document.createElement('small');
+    name.textContent = m.id;
+    const unit = document.createElement('small');
+    unit.textContent = 'モーラ/秒';
+    row.append(swatch, name, document.createTextNode(` ${value} `), unit);
+    row.classList.toggle('hidden', !m.visible);
+    return row;
+  }));
 }
 
 // ---- 推論 ------------------------------------------------------------------------------
@@ -46,18 +107,22 @@ async function inferAt(state, end) {
   const started = performance.now();
   const window16k = extractWindow16k(state.ring, end, state.rate);
   if (window16k === null) return;
-  const mel = logMelSpectrogram(window16k); // (201, 80)
+  const mel = logMelSpectrogram(window16k); // (201, 80)。全モデルで同じ入力を使う
   const input = new ort.Tensor('float32', mel.data, [1, mel.numFrames, mel.nMels]);
-  const outputs = await state.session.run({ log_mel: input });
-  const mora = outputs.mora.data[0];
-  const moraPerSec = mora / WINDOW_SEC;
+  const values = [];
+  for (const session of state.sessions) {
+    const outputs = await session.run({ log_mel: input });
+    values.push(outputs.mora.data[0] / WINDOW_SEC); // 毎秒モーラ数 = モーラ数 ÷ 2.0 秒
+  }
   state.lastMs = performance.now() - started;
   if (rec !== state) return; // 停止後に終わった推論は表示しない
   const t = end / state.rate;
-  history.push({ t, v: moraPerSec });
   nowSec = t;
-  history = pruneHistory(history, nowSec, SPAN_SEC);
-  currentEl.firstChild.textContent = `${moraPerSec.toFixed(2)} `;
+  models.forEach((m, i) => {
+    histories[m.id].push({ t, v: values[i] });
+    histories[m.id] = pruneHistory(histories[m.id], nowSec, SPAN_SEC);
+  });
+  showCurrent();
   draw();
   showStats(state);
 }
@@ -83,14 +148,14 @@ function onChunk(state, chunk) {
 function showStats(state) {
   const s = state.scheduler;
   statsEl.textContent = `入力 ${state.rate} Hz → 16000 Hz ／ 推論 ${s.runs} 回 ／ 間引き ${s.skipped} 回`
-    + (state.lastMs !== undefined ? ` ／ 直近の処理 ${state.lastMs.toFixed(0)} ms` : '');
+    + (state.lastMs !== undefined ? ` ／ 直近の処理 ${state.lastMs.toFixed(0)} ms（${models.length} モデルの合計）` : '');
 }
 
 // ---- 録音 ------------------------------------------------------------------------------
 
 async function start() {
   statusEl.textContent = 'モデルを読み込み中…';
-  const session = await getSession();
+  const sessions = await getSessions();
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
   });
@@ -102,14 +167,14 @@ async function start() {
   mute.gain.value = 0; // 処理を駆動するため出力へつなぐが、音は出さない
   const rate = context.sampleRate;
   const state = {
-    session, stream, context, source, node, rate,
+    sessions, stream, context, source, node, rate,
     ring: new RingBuffer(Math.ceil(RING_SEC * rate)),
     scheduler: new InferenceScheduler(rate),
     busy: false,
   };
-  history = [];
+  clearHistories();
   nowSec = 0;
-  currentEl.firstChild.textContent = '–.– ';
+  showCurrent();
   node.port.onmessage = (event) => onChunk(state, event.data);
   source.connect(node).connect(mute).connect(context.destination);
   rec = state;
@@ -157,7 +222,8 @@ function draw() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
-  const yMax = yAxisMax(history.map((p) => p.v));
+  const shown = visibleModels();
+  const yMax = yAxisMax(visibleValues(histories, shown.map((m) => m.id)));
   const now = Math.max(nowSec, SPAN_SEC); // 録音直後は左端を 0 秒に固定
   const sc = makeScale({ width, height, left: 36, right: 12, top: 10, bottom: 24, spanSec: SPAN_SEC, nowSec: now, yMax });
 
@@ -196,29 +262,45 @@ function draw() {
   ctx.strokeStyle = '#999';
   ctx.strokeRect(sc.left, sc.top, sc.right - sc.left, sc.bottom - sc.top);
 
-  if (history.length > 0) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(sc.left, sc.top, sc.right - sc.left, sc.bottom - sc.top);
-    ctx.clip();
-    ctx.strokeStyle = '#1565c0';
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(sc.left, sc.top, sc.right - sc.left, sc.bottom - sc.top);
+  ctx.clip();
+  for (const m of shown) {
+    const points = histories[m.id] ?? [];
+    if (points.length === 0) continue;
+    ctx.strokeStyle = m.color;
     ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
     ctx.beginPath();
-    history.forEach((p, i) => {
+    points.forEach((p, i) => {
       const x = sc.x(p.t);
       const y = sc.y(p.v);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
     ctx.stroke();
-    const last = history[history.length - 1];
-    ctx.fillStyle = '#1565c0';
+    const last = points[points.length - 1];
+    ctx.fillStyle = m.color;
+    ctx.strokeStyle = '#fff'; // 重なった点を見分けるための縁
     ctx.beginPath();
-    ctx.arc(sc.x(last.t), sc.y(last.v), 3, 0, 2 * Math.PI);
+    ctx.arc(sc.x(last.t), sc.y(last.v), 4, 0, 2 * Math.PI);
     ctx.fill();
-    ctx.restore();
+    ctx.stroke();
   }
+  ctx.restore();
 }
 
 window.addEventListener('resize', draw);
+manifestPromise
+  .then((list) => {
+    buildModelToggles(list);
+    showCurrent();
+    draw();
+  })
+  .catch((error) => {
+    statusEl.textContent = `モデルの一覧のエラー: ${error.message ?? error}`;
+    recordButton.disabled = true;
+    console.error(error);
+  });
 draw();

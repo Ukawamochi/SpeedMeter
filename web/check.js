@@ -6,6 +6,7 @@ import { buildWholeInput, buildWindowInput } from './dsp.js';
 import { createSession, ort } from './model.js';
 
 const REFERENCE_URL = 'reference/onnx_exp005_fp32.json';
+const MODEL_FILE = 'exp005.onnx'; // 参照値を作ったモデル（scripts/setup_web_model.py が置く）
 const REFERENCE_ATOL = 1e-3; // モーラ。tests/test_web_demo.py の MORA_ATOL と同じ
 
 const statusEl = document.getElementById('status');
@@ -41,7 +42,7 @@ button.addEventListener('click', async () => {
     statusEl.textContent = '読み込み中…';
     const [reference, session] = await Promise.all([
       fetch(REFERENCE_URL).then((r) => r.json()),
-      createSession(),
+      createSession(MODEL_FILE),
     ]);
     const samples = Float32Array.from(reference.waveform_int16, (v) => Math.fround(v / 32768));
     statusEl.textContent = '計算中…';

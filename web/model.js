@@ -7,8 +7,16 @@ ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/di
 ort.env.wasm.numThreads = 1;
 
 export { ort };
-export const MODEL_URL = 'models/model_fp32.onnx'; // scripts/setup_web_model.py が置く
+// scripts/setup_web_model.py が置く。一覧は [{ id, file, sha256 }]（--source の順）
+export const MODELS_DIR = 'models/';
+export const MANIFEST_URL = `${MODELS_DIR}models.json`;
 
-export function createSession() {
-  return ort.InferenceSession.create(MODEL_URL, { executionProviders: ['wasm'] });
+export async function loadManifest() {
+  const response = await fetch(MANIFEST_URL);
+  if (!response.ok) throw new Error(`${MANIFEST_URL} が読めない（scripts/setup_web_model.py を実行する）`);
+  return response.json();
+}
+
+export function createSession(file) {
+  return ort.InferenceSession.create(`${MODELS_DIR}${file}`, { executionProviders: ['wasm'] });
 }
