@@ -21,6 +21,11 @@
 - 正解: モーラ時刻 t を t' = (t − a / sr) · s に変換し、窓 [k / sr, k / sr + 2.0) で数える
   （``stretched_window_label``）。残響・雑音・帯域制限・音量・周波数マスクは時刻を変えない
 - SNR の基準は抜粋の実効値（009 1.4節の注）
+- 速い窓の選び直し（``windows.fast_window_redraws``。既定0で無効。docs/decisions/011-fast-window-sampling.md）:
+  伸縮の抽選に当たった窓の正解が毎秒 ``fast_window_min_rate``（既定10）未満なら、別の生成器
+  ``default_rng((seed, epoch, index, FAST_REDRAW_TAG))`` で伸縮率だけを最大 K 回引き直し、
+  窓の相対位置 w / (N' − W) を保ったまま、閾値以上になった最初の候補を使う（無ければ元の窓）。
+  主の生成器は引き直しに使わないので、残りの拡張・周波数マスクの乱数の系列は無効のときと同じ
 
 モーラ区間は ``data/processed/alignments/train.jsonl``（dev.jsonl と同じ形式）から読み、
 クリップ全体を連結した float32 配列と開始位置で持つ（DataLoader のワーカーへの受け渡しを
@@ -63,6 +68,7 @@ from spkrate.train.data import ClipItem, Normalizer
 __all__ = [
     "CONCAT_SEED_TAG",
     "CONCAT_PICK_TAG",
+    "FAST_REDRAW_TAG",
     "TrainClip",
     "WindowPlan",
     "WindowSettings",
@@ -70,6 +76,8 @@ __all__ = [
     "assemble_excerpt",
     "build_epoch_concat_groups",
     "draw_window_plan",
+    "plan_for_stretch",
+    "redraw_stretch_keep_position",
     "load_train_clips",
     "read_clip_list",
     "WindowEpochStats",
@@ -81,6 +89,8 @@ __all__ = [
 SAMPLE_RATE = 16000
 CONCAT_SEED_TAG = 0xC0CA7  # 連結の組の作成の種に入れる印（009 1.3節）
 CONCAT_PICK_TAG = 0x5E1EC7  # 組の非復元抽出の種に入れる印（009 1.3節）
+FAST_REDRAW_TAG = 0xFA57  # 速い窓の選び直しの種に入れる印（011-fast-window-sampling）
+HIGH_RATE_THRESHOLDS = (10.0, 12.0, 14.0)  # エポックの集計に数える毎秒モーラ数の閾値
 
 
 # --------------------------------------------------------------------------------------
@@ -100,6 +110,11 @@ class WindowSettings:
     concat_gap_sec: tuple[float, float] = (0.3, 1.5)
     concat_gap_round_sec: float = 0.01
     sample_rate: int = SAMPLE_RATE
+    # 速い窓の選び直し（docs/decisions/011-fast-window-sampling.md。exp015）。0 で無効（既定）。
+    # 伸縮の抽選に当たった窓の正解が毎秒 fast_window_min_rate 未満なら、伸縮率だけを最大この回数
+    # 引き直す（窓の相対位置は保つ）。エポックあたりの窓数は変わらない
+    fast_window_redraws: int = 0
+    fast_window_min_rate: float = 10.0
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any] | None) -> "WindowSettings":
@@ -117,6 +132,12 @@ class WindowSettings:
             raise ValueError(f"windows.margin_sec は0以上: {settings.margin_sec}")
         if abs(settings.window_samples / settings.sample_rate - settings.window_sec) > 1e-9:
             raise ValueError(f"窓長が標本の整数倍でない: {settings.window_sec}")
+        redraws = settings.fast_window_redraws
+        if isinstance(redraws, bool) or not isinstance(redraws, int) or redraws < 0:
+            raise ValueError(f"windows.fast_window_redraws は0以上の整数: {redraws!r}")
+        rate = float(settings.fast_window_min_rate)
+        if not math.isfinite(rate) or rate <= 0.0:
+            raise ValueError(f"windows.fast_window_min_rate は正の有限値: {rate}")
         return settings
 
     @property
@@ -157,6 +178,7 @@ class WindowPlan:
         start: 伸縮後の音源上の窓の開始 w（標本）
         stretched_length: 伸縮後の音源長 N' = round(N · s)
         excerpt_start / excerpt_end: 元の音源上の抜粋 [a, b)（標本）
+        fast_redraws: 速い窓の選び直しで採った候補の番号（1始まり）。選び直していなければ0
     """
 
     stretch: float
@@ -165,6 +187,36 @@ class WindowPlan:
     stretched_length: int
     excerpt_start: int
     excerpt_end: int
+    fast_redraws: int = 0
+
+
+def plan_for_stretch(
+    num_samples: int,
+    *,
+    stretch: float,
+    stretch_drawn: bool,
+    start: int,
+    window_samples: int,
+    margin_samples: int,
+    fast_redraws: int = 0,
+) -> WindowPlan:
+    """伸縮率 s と窓の開始 w から抜粋の範囲を決める（乱数は使わない）。"""
+    n = int(num_samples)
+    stretched_length = n if stretch == 1.0 else int(round(n * stretch))
+    stretched_length = max(stretched_length, window_samples)
+    a = int(math.floor(start / stretch - margin_samples))
+    b = int(math.ceil((start + window_samples) / stretch + margin_samples))
+    a = max(0, a)
+    b = min(n, b)
+    return WindowPlan(
+        stretch=float(stretch),
+        stretch_drawn=bool(stretch_drawn),
+        start=int(start),
+        stretched_length=stretched_length,
+        excerpt_start=a,
+        excerpt_end=b,
+        fast_redraws=int(fast_redraws),
+    )
 
 
 def draw_window_plan(
@@ -200,17 +252,54 @@ def draw_window_plan(
     stretched_length = n if stretch == 1.0 else int(round(n * stretch))
     stretched_length = max(stretched_length, window_samples)
     start = int(rng.integers(0, stretched_length - window_samples + 1))
-    a = int(math.floor(start / stretch - margin_samples))
-    b = int(math.ceil((start + window_samples) / stretch + margin_samples))
-    a = max(0, a)
-    b = min(n, b)
-    return WindowPlan(
-        stretch=float(stretch),
+    return plan_for_stretch(
+        n,
+        stretch=stretch,
         stretch_drawn=drawn,
         start=start,
-        stretched_length=stretched_length,
-        excerpt_start=a,
-        excerpt_end=b,
+        window_samples=window_samples,
+        margin_samples=margin_samples,
+    )
+
+
+def redraw_stretch_keep_position(
+    plan: WindowPlan,
+    rng: np.random.Generator,
+    num_samples: int,
+    *,
+    window_samples: int,
+    margin_samples: int,
+    augment: AugmentConfig,
+    attempt: int,
+) -> WindowPlan:
+    """伸縮率だけを引き直した候補（速い窓の選び直し。011-fast-window-sampling）。
+
+    伸縮率は ``draw_window_plan`` と同じ範囲 [max(下限, W / N), 上限] と分布から ``rng`` で1回引く。
+    窓の開始は相対位置 w / (N' − W) を保つ: w' = round(w · (N'' − W) / (N' − W))（N' − W = 0 なら0）。
+    伸縮の抽選（確率）は引き直さない（``plan.stretch_drawn`` の窓にだけ使う）。
+    """
+    n = int(num_samples)
+    low = stretch_lower_bound(augment.time_stretch_range[0], n, window_samples)
+    high = float(augment.time_stretch_range[1])
+    if low > high:
+        raise ValueError(f"伸縮率の範囲が空: [{low}, {high}]")
+    stretch = draw_time_stretch(
+        rng, low, high, getattr(augment, "time_stretch_distribution", "uniform")
+    )
+    new_length = n if stretch == 1.0 else int(round(n * stretch))
+    new_length = max(new_length, window_samples)
+    old_span = plan.stretched_length - window_samples
+    new_span = new_length - window_samples
+    start = 0 if old_span <= 0 else int(round(plan.start * new_span / old_span))
+    start = min(max(start, 0), new_span)
+    return plan_for_stretch(
+        n,
+        stretch=stretch,
+        stretch_drawn=True,
+        start=start,
+        window_samples=window_samples,
+        margin_samples=margin_samples,
+        fast_redraws=attempt,
     )
 
 
@@ -503,6 +592,13 @@ class WindowTrainDataset(Dataset):
             None if augment is None else replace(augment, time_stretch_enabled=False)
         )
         self.noise_source = noise_source
+        if settings.fast_window_redraws > 0 and (
+            augment is None or not augment.time_stretch_enabled
+        ):
+            raise ValueError(
+                "windows.fast_window_redraws は時間伸縮が有効なときだけ使える"
+                "（伸縮率を引き直して速い窓を増やすため）"
+            )
         self.seed = int(seed)
         self.mel_config = mel_config
         self.loader = loader
@@ -629,14 +725,7 @@ class WindowTrainDataset(Dataset):
         settings = self.settings
         w_samples = settings.window_samples
         source = self.source(index)
-        rng = np.random.default_rng((self.seed, self.epoch, index))
-        plan = draw_window_plan(
-            rng,
-            source.num_samples,
-            window_samples=w_samples,
-            margin_samples=settings.margin_samples,
-            augment=self.augment,
-        )
+        rng, plan = self._draw_plan(index, source)
         excerpt = assemble_excerpt(source, plan.excerpt_start, plan.excerpt_end, self._load_clip)
         applied: list[str] = []
         if plan.stretch != 1.0:
@@ -684,22 +773,19 @@ class WindowTrainDataset(Dataset):
         Returns:
             (窓の正解モーラ数, 窓の取り方, 音源)
         """
+        source = self.source(index)
+        _, plan = self._draw_plan(index, source)
+        starts, ends = self.source_moras(source)
+        return self._plan_label(plan, starts, ends), plan, source
+
+    def _plan_label(self, plan: WindowPlan, starts: np.ndarray, ends: np.ndarray) -> float:
+        """窓の取り方から、音声を読まずに正解モーラ数を求める（``window`` の ``mora`` と同じ値）。"""
         settings = self.settings
         w_samples = settings.window_samples
-        source = self.source(index)
-        rng = np.random.default_rng((self.seed, self.epoch, index))
-        plan = draw_window_plan(
-            rng,
-            source.num_samples,
-            window_samples=w_samples,
-            margin_samples=settings.margin_samples,
-            augment=self.augment,
-        )
         length = plan.excerpt_end - plan.excerpt_start
         if plan.stretch != 1.0:
             length = int(round(length * plan.stretch))
         k = window_start_in_excerpt(plan.start, plan.excerpt_start, plan.stretch, length, w_samples)
-        starts, ends = self.source_moras(source)
         label = stretched_window_label(
             starts,
             ends,
@@ -709,7 +795,49 @@ class WindowTrainDataset(Dataset):
             window_sec=settings.window_sec,
             sample_rate=settings.sample_rate,
         )
-        return float(label), plan, source
+        return float(label)
+
+    def _draw_plan(
+        self, index: int, source: WindowSource
+    ) -> tuple[np.random.Generator, WindowPlan]:
+        """件の主の生成器と窓の取り方（速い窓の選び直しを含む）。
+
+        主の生成器 ``default_rng((seed, epoch, index))`` から伸縮の抽選 → 伸縮率 → 窓の位置を引く。
+        ``fast_window_redraws`` が正で、伸縮の抽選に当たり、正解が毎秒 ``fast_window_min_rate``
+        未満なら、別の生成器 ``default_rng((seed, epoch, index, FAST_REDRAW_TAG))`` で伸縮率だけを
+        最大 K 回引き直し、閾値以上になった最初の候補を使う（無ければ元の窓）。主の生成器は
+        引き直しに使わないので、返した後の系列（残りの拡張・周波数マスク）は無効のときと同じ。
+        """
+        settings = self.settings
+        rng = np.random.default_rng((self.seed, self.epoch, index))
+        plan = draw_window_plan(
+            rng,
+            source.num_samples,
+            window_samples=settings.window_samples,
+            margin_samples=settings.margin_samples,
+            augment=self.augment,
+        )
+        redraws = int(settings.fast_window_redraws)
+        if redraws <= 0 or not plan.stretch_drawn or self.augment is None:
+            return rng, plan
+        threshold = float(settings.fast_window_min_rate) * float(settings.window_sec)
+        starts, ends = self.source_moras(source)
+        if self._plan_label(plan, starts, ends) >= threshold:
+            return rng, plan
+        sub = np.random.default_rng((self.seed, self.epoch, index, FAST_REDRAW_TAG))
+        for attempt in range(1, redraws + 1):
+            candidate = redraw_stretch_keep_position(
+                plan,
+                sub,
+                source.num_samples,
+                window_samples=settings.window_samples,
+                margin_samples=settings.margin_samples,
+                augment=self.augment,
+                attempt=attempt,
+            )
+            if self._plan_label(candidate, starts, ends) >= threshold:
+                return rng, candidate
+        return rng, plan
 
     def __getitem__(self, index: int) -> ClipItem:
         info = self.window(index)
@@ -755,6 +883,8 @@ class WindowEpochStats:
     stretch_max: float = -math.inf
     zero: int = 0
     bands: Counter = field(default_factory=Counter)
+    # 毎秒10・12・14モーラ以上の窓の件数（高速度域。docs/directives/2026-09-28-fast-speech.md）
+    high: Counter = field(default_factory=Counter)
     total: int = 0
 
     def update(
@@ -779,7 +909,11 @@ class WindowEpochStats:
                 self.stretch_max = max(self.stretch_max, float(s))
             if float(m) == 0.0:
                 self.zero += 1
-            self.bands[band_of(float(m) / float(d))] += 1
+            rate = float(m) / float(d)
+            self.bands[band_of(rate)] += 1
+            for threshold in HIGH_RATE_THRESHOLDS:
+                if rate >= threshold:
+                    self.high[threshold] += 1
 
     def as_dict(self) -> dict[str, Any]:
         from spkrate.eval.metrics import BAND_KEYS
@@ -796,6 +930,7 @@ class WindowEpochStats:
             "window_zero": self.zero,
             "window_zero_rate": self.zero / total if total else float("nan"),
             **{f"window_band_{b}": int(self.bands.get(b, 0)) for b in BAND_KEYS},
+            **{f"window_rate_ge{int(t)}": int(self.high.get(t, 0)) for t in HIGH_RATE_THRESHOLDS},
         }
 
     def describe(self, epoch: int) -> str:
@@ -806,5 +941,6 @@ class WindowEpochStats:
             f"伸縮率(平均/最小/最大)={d['window_stretch_mean']:.3f}/{d['window_stretch_min']:.3f}/"
             f"{d['window_stretch_max']:.3f} 正解0の窓={d['window_zero']}({d['window_zero_rate']:.4f}) "
             f"帯別(<4/4-6/6-8/>=8)={d['window_band_under4']}/{d['window_band_4to6']}/"
-            f"{d['window_band_6to8']}/{d['window_band_over8']}"
+            f"{d['window_band_6to8']}/{d['window_band_over8']} "
+            f"毎秒10/12/14以上={d['window_rate_ge10']}/{d['window_rate_ge12']}/{d['window_rate_ge14']}"
         )

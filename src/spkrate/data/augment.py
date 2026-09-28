@@ -5,6 +5,8 @@ docs/spec.md が許す拡張は次の5種である。
     時間伸縮0.7〜1.5倍（音程保持、モーラ数は不変）、雑音重畳SNR0〜20dB、
     合成残響、音量変化、帯域制限。**時間方向のマスクは正解と矛盾するため禁止**
 
+時間伸縮の範囲は、新しい実験の設定では0.5〜1.5倍まで使ってよい（spec の注。既定は0.7〜1.5倍）。
+
 この規則から、本モジュールの設計は次のようになる。
 
 ## 拡張は波形に適用する
@@ -127,8 +129,8 @@ def _uniform(rng: np.random.Generator, bounds: Sequence[float]) -> float:
 # --------------------------------------------------------------------------------------
 # 時間伸縮
 
-# 伸縮率の分布（docs/experiments/011-search-plan.md 4.2節）。範囲は docs/spec.md の
-# 「0.7〜1.5倍」のまま、範囲の中の分布だけを選ぶ。既定は ``uniform``（従来の挙動）。
+# 伸縮率の分布（docs/experiments/011-search-plan.md 4.2節）。範囲（time_stretch_range。既定
+# 0.7〜1.5倍、spec の許す最大は0.5〜1.5倍）の中の分布を選ぶ。既定は ``uniform``（従来の挙動）。
 TIME_STRETCH_DISTRIBUTIONS: tuple[str, ...] = ("uniform", "log_uniform")
 
 
@@ -710,7 +712,7 @@ class AugmentConfig:
 
     sample_rate: int = SAMPLE_RATE
 
-    # 時間伸縮（docs/spec.md「0.7〜1.5倍」）
+    # 時間伸縮（docs/spec.md。既定は0.7〜1.5倍、新しい実験の設定では0.5〜1.5倍まで使ってよい）
     time_stretch_enabled: bool = True
     time_stretch_prob: float = 0.5
     time_stretch_range: tuple[float, float] = (0.7, 1.5)
@@ -981,7 +983,9 @@ _RANGES: dict[str, tuple[str, ...]] = {
 #: 範囲を変える場合は先に docs/spec.md を更新する（docs/questions.md 2026-09-24 回答3）。
 #: spec.md に範囲が無い項目には制約を設けない。
 SPEC_RANGES: dict[str, tuple[float, float, str]] = {
-    "time_stretch_range": (0.7, 1.5, "時間伸縮0.7〜1.5倍"),
+    # 既定は0.7〜1.5倍（AugmentConfig の既定値）。新しい実験の設定では0.5〜1.5倍まで使ってよい
+    # （docs/spec.md「データ拡張」の注、docs/directives/2026-09-28-fast-speech.md 0節1）。
+    "time_stretch_range": (0.5, 1.5, "時間伸縮0.5〜1.5倍（既定は0.7〜1.5倍）"),
     "snr_db_range": (0.0, 20.0, "雑音重畳SNR0〜20dB"),
 }
 
