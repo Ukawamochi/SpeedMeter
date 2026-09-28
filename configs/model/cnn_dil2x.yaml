@@ -1,0 +1,41 @@
+# exp011 用: cnn_base から膨張率だけを2倍にした構成（docs/experiments/011-search-plan.md）。元は話速推定CNNの既定構成（docs/PLAN.md 第5段階 5-1、docs/spec.md「モデル構造」）
+# 実装: src/spkrate/models/cnn.py
+#
+# 構造: 周波数方向を圧縮する2次元畳み込み層 → 時間方向の膨張畳み込み層
+#       → フレームごとのsoftplus出力 → 時間方向の総和
+# 出力はクリップの**モーラ数**（毎秒モーラ数ではない）。換算は評価側で行う。
+#
+# 受容野の制約（docs/decisions/005-window-strategy.md 0節・4.2節）:
+#   201フレーム（2.0秒）以下に必ず収める。推奨は51〜101フレーム。
+#   この構成の受容野は 131 フレーム（1.31秒）である（cnn_base は 69）。推奨の 51〜101 は超えるが上限 201 未満。
+#   内訳: 1 + 周波数段 3層 ×(3-1)×1 = 6 + 時間段 (3-1)×(2+4+8+16+32) = 124
+#   計算は spkrate.models.cnn.receptive_field_frames で行い、
+#   201フレームを超える設定は CnnConfig が拒否する。
+#
+# 時間方向の刻みは10ミリ秒（hop_length=160、configs/normalization.yaml と同じ特徴量）。
+# 入力は正規化済みの対数メルスペクトログラム (バッチ, フレーム, 80)。
+
+model:
+  # 入力のメル次元数。src/spkrate/features/melspec.py の n_mels と一致させる。
+  n_mels: 80
+
+  # --- 周波数方向を圧縮する2次元畳み込み層 ---
+  # 周波数 80 → 40 → 20 → 10。時間方向は刻み1（フレーム数を保つ）。
+  freq_channels: [32, 64, 64]
+  freq_strides: [2, 2, 2]
+  freq_kernel: [3, 3]   # [周波数方向, 時間方向]
+  freq_pool: flatten    # 残った周波数軸の畳み方。flatten か mean
+
+  # --- 時間方向の膨張畳み込み層 ---
+  # 層数はこの2つの列の長さで決まる（長さは一致させる）。
+  temporal_channels: [128, 128, 128, 128, 128]
+  dilations: [2, 4, 8, 16, 32]   # cnn_base は [1, 2, 4, 8, 16]。exp011（011 の膨張率2倍）
+  temporal_kernel: 3
+
+  # --- 共通 ---
+  activation: relu
+  norm: none        # none か layer（layer はフレームごとの正規化で詰め物に影響されない）
+  dropout: 0.0
+
+  # 受容野の上限（フレーム）。2.0秒 = 201フレーム。
+  max_receptive_field_frames: 201
