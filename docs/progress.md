@@ -358,3 +358,7 @@
 ### 2026-09-28 実装: 指示書 2026-09-27 A-3（exp010 の伸縮率の分布と MACs）
 - feat/stretch-dist-macs（e2be66e〜95f256b）: AugmentConfig.time_stretch_distribution（uniform / log_uniform、既定 uniform。乱数の消費は同じ1回、方式A・B両方）、WindowTrainDataset.window_label と scripts/epoch_window_label_distribution.py、cnn.estimate_macs（model_summary に macs_201_frames）。pytest 801 passed・5 skipped。
 - exp005 の設定のエポック1の窓（455,286件から20,000件を抽出）の16モーラ以上の割合: uniform 20.8%、log_uniform 22.3%。MACs は 011 1.2節の見込みと一致（exp005 239.5・exp009 102.4・exp012 185.1・exp013 61.7 百万）。
+
+### 2026-09-28 測定: 指示書 2026-09-27 A-3 exp008 の完了と評価（損失 mse → poisson）
+- exp008 は 08:29 に上限30エポックで終了（最良エポック30、dev_window_val MAE 0.4851。exp005 0.4737、exp007 0.4779）。26〜30 は単調でなく 011 の「未収束」には当たらない。dev_window 主指標 MAE は clean 0.4858、雑音下まとめ 0.7196、8以上の偏りは clean −0.4358・雑音下 −0.7416。
+- 011 2.2節の値: G2・G3・G4（8以上）が基準を満たさず、P8 は悪化（clean は境目）、P0 は差なし、D1 は小さくなった。results/exp008_eval.md と metrics.csv（013-*）に記録した。採否は A-4 に任せる。設定は exp/013-poisson-loss（3914f67）。
