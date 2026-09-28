@@ -399,3 +399,7 @@
 ### 2026-09-28 測定: 指示書 2026-09-28-fast-speech タスク1（高速度域の評価）
 - 判定の基準を exp005・exp007 の区間別の差（s_bin 0.11）から決め、exp010 を見る前に results/fast_speech_eval.md 1節にコミットした（326471d）。評価2の推論は ubuntu-desktop・cuda（19:20 に空いた）、遠隔機の dev_fast は作り直しでは一致しないため送ったファイルの md5 一致で確認した。
 - 評価1 13to14 の出力の平均（正解13.28）: exp005 10.92・exp007 10.97・exp010 10.75。天井は評価1で約11（13to14）、評価2では ge14 まで増え続け x1.5 12.1・x2 12.0。exp010 は F1 で6セルとも悪化（評価1 12to13 は境目）、N1〜N5 は満たす。metrics.csv に 013-fast-speech-* 各29行。
+
+### 2026-09-28 測定: 指示書 2026-09-28-fast-speech タスク2 exp014 の起動（伸縮の範囲 0.5〜1.5・対数一様）
+- exp/019-stretch-wide に configs/exp014.yaml（241c60f）。exp005 との差は augment.params の time_stretch_range [0.5, 1.5]・time_stretch_distribution log_uniform、device cuda、num_workers 12、ID と notes。ubuntu-desktop の tmux exp014 で 19:27 に起動、log.txt に「伸縮率=0.5〜1.5倍 分布=log_uniform」を確認。
+- エポック1: 545秒（exp010 979秒）、データ待ち比率 0.526、available 最小 3.4GiB。窓の毎秒10/12/14以上 10.3/4.1/1.7%。伸縮した窓の s<1 は名目63.1%→実際58.7%（下限 max(0.5, 2.0÷音源長) で切られた窓 23.6%、20,000窓の見積もり）。
