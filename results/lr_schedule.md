@@ -89,10 +89,10 @@
 
 ## 参照ファイル
 
-- `/Users/uka/Desktop/SpeedMeter/configs/exp003.yaml`
-- `/Users/uka/Desktop/SpeedMeter/configs/model/cnn_base.yaml`
-- `/Users/uka/Desktop/SpeedMeter/src/spkrate/train/train.py`
-- `/Users/uka/Desktop/SpeedMeter/src/spkrate/models/cnn.py`
-- `/Users/uka/Desktop/SpeedMeter/runs/exp003/log.txt`
-- `/Users/uka/Desktop/SpeedMeter/runs/exp003/metrics.jsonl`
-- `/Users/uka/Desktop/SpeedMeter/runs/exp003/config_snapshot.yaml`
+- `configs/exp003.yaml`
+- `configs/model/cnn_base.yaml`
+- `src/spkrate/train/train.py`
+- `src/spkrate/models/cnn.py`
+- `runs/exp003/log.txt`
+- `runs/exp003/metrics.jsonl`
+- `runs/exp003/config_snapshot.yaml`
