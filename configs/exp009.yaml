@@ -15,7 +15,8 @@
 # - model_config: configs/model/cnn_base.yaml → configs/model/cnn_freq16.yaml
 #     周波数段のチャネル数 [32, 64, 64] → [16, 32, 32]（それ以外の構造は cnn_base と同じ）。
 #     ブラウザで常時動かすための軽さの条件（011 1.2節: パラメータ数 −33%、積和の回数 −57% の見込み）。
-# - runs_dir: runs → /Users/uka/Desktop/SpeedMeter/runs
+# - runs_dir: runs（同じ）。学習は worktree から実行したため、そのときだけ出力先を元の作業ツリーの
+#   runs/ の絶対パスにしていた（Public のため、パスはリポジトリに書かない）
 #     Mac の worktree から学習し、出力を元の作業ツリーの runs/exp009 に置くため（worktree の runs/ を
 #     symlink にすると未追跡のファイルとして git status に出るため、絶対パスにした）。
 # - experiment_id と notes の文言。
@@ -25,7 +26,7 @@
 experiment_id: exp009
 seed: 20260921
 device: mps          # CLAUDE.md「学習デバイスはmps」
-runs_dir: /Users/uka/Desktop/SpeedMeter/runs   # 元の作業ツリーの runs/（冒頭のコメント）
+runs_dir: runs
 model_config: configs/model/cnn_freq16.yaml   # exp005 は cnn_base.yaml。周波数段 [16, 32, 32]
 notes: exp005 と同じ設定（方式B・学習クリップの絞り込み・MUSAN 学習用分割・拡張・無音サンプル・seed）で、周波数段のチャネル数だけを [16, 32, 32] に半分にする（軽さの条件、011 の exp009）。mps で学習。初期状態から、早期終了（patience 5、上限30）
 
