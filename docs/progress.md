@@ -366,3 +366,7 @@
 ### 2026-09-28 測定: 指示書 2026-09-27 A-3 exp010 の起動（伸縮率の分布 一様 → 対数一様）
 - exp/015-stretch-log-uniform に configs/exp010.yaml（54490e8）を置いた。exp005 との差は augment.params.time_stretch_distribution: log_uniform・device cuda・ID と notes だけ（キーは AugmentSettings の params の下に置く必要があった）。
 - ubuntu-desktop（cuda）の tmux exp010 で 09:19 に起動した（見込み約8時間15分）。log.txt に「分布=log_uniform」を確認。docs/compute.md に記録。
+
+### 2026-09-28 測定: 指示書 2026-09-27 A-3 exp009（完了と評価）
+- exp009 は 11:42 に上限30エポックで終了（最良エポック30、dev_window_val MAE 0.4900。exp005 は 26・0.4737）。dev_window 主指標 MAE は clean 0.4930、雑音下まとめ 0.7245、クリップ単位 dev 0.4447、D1 0.0925。ONNX fp32 1,347,066 B（exp005 2,005,372 B）。metrics.csv に 014-* を追記（d44e399）。
+- results/exp009_eval.md に exp005・exp007 と並べ、011 2.3節の L1〜L7 の値を表にした。L2（clean 0.4930 > 0.4886）・L3（0.7245 > 0.7151）・L4 の4以上6未満（0.4900 > 0.4834）が上限を超え、他は以内。採否は A-4。推論時間は未測定。
