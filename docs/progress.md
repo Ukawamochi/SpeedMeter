@@ -403,3 +403,8 @@
 ### 2026-09-28 測定: 指示書 2026-09-28-fast-speech タスク2 exp014 の起動（伸縮の範囲 0.5〜1.5・対数一様）
 - exp/019-stretch-wide に configs/exp014.yaml（241c60f）。exp005 との差は augment.params の time_stretch_range [0.5, 1.5]・time_stretch_distribution log_uniform、device cuda、num_workers 12、ID と notes。ubuntu-desktop の tmux exp014 で 19:27 に起動、log.txt に「伸縮率=0.5〜1.5倍 分布=log_uniform」を確認。
 - エポック1: 545秒（exp010 979秒）、データ待ち比率 0.526、available 最小 3.4GiB。窓の毎秒10/12/14以上 10.3/4.1/1.7%。伸縮した窓の s<1 は名目63.1%→実際58.7%（下限 max(0.5, 2.0÷音源長) で切られた窓 23.6%、20,000窓の見積もり）。
+
+### 2026-09-29 統括: 待ち行列の起動（exp014→exp015 を ubuntu、exp012→exp011 を mac）
+- 人間の指示で、計算機ごとの待ち行列を 01:30 に起動した（runs/queue/ の queue_ubuntu-desktop.sh と queue_mac.sh、ログは runs/queue_<計算機>.log）。学習の終了は、プロセスの終了と run_summary.json の存在で判定し、段が失敗したら止まる。git は操作しない。
+- exp015 の設定（exp/020-stretch-wide-fast-windows の 4abc2dd）と exp011 の設定（exp/016-dilation-x2 の c934455、Mac の mps）を作り、exp012・exp014 の設定のブランチを main にマージした。評価のスクリプト runs/queue/run_<実験>_eval.sh は run_exp014_eval.sh と同じ手順で、metrics.csv は git checkout ではなく写しから戻す。
+- 待ち行列と重ならないよう、exp012 と exp014 の担当のサブエージェントを止めた（学習は止めていない）。
