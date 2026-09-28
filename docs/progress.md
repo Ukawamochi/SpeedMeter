@@ -408,3 +408,4 @@
 - 人間の指示で、計算機ごとの待ち行列を 01:30 に起動した（runs/queue/ の queue_ubuntu-desktop.sh と queue_mac.sh、ログは runs/queue_<計算機>.log）。学習の終了は、プロセスの終了と run_summary.json の存在で判定し、段が失敗したら止まる。git は操作しない。
 - exp015 の設定（exp/020-stretch-wide-fast-windows の 4abc2dd）と exp011 の設定（exp/016-dilation-x2 の c934455、Mac の mps）を作り、exp012・exp014 の設定のブランチを main にマージした。評価のスクリプト runs/queue/run_<実験>_eval.sh は run_exp014_eval.sh と同じ手順で、metrics.csv は git checkout ではなく写しから戻す。
 - 待ち行列と重ならないよう、exp012 と exp014 の担当のサブエージェントを止めた（学習は止めていない）。
+- exp012（mac）は 2026-09-29 01:43 に上限30エポックで学習を終えた（最良エポック30、検証 MAE 0.5192）。queue_mac が出力を runs/exp012 にコピーし、01:44 に評価を始めた。
