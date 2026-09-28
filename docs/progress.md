@@ -411,3 +411,4 @@
 - exp012（mac）は 2026-09-29 01:43 に上限30エポックで学習を終えた（最良エポック30、検証 MAE 0.5192）。queue_mac が出力を runs/exp012 にコピーし、01:44 に評価を始めた。
 - exp012 の評価（queue_mac、mps）が 02:24 に終わった（全段 rc=0、CPU フォールバック0件）。dev_window 主指標 MAE は clean 0.5209、雑音下まとめ 0.7552。011 2.3節は L1・L5・L7 が上限以内、L2・L3・L4（4帯）・L6（clean の平均 0.2332 は +0.0002 の境目、雑音下の平均 0.640）が上限を超える。
 - ONNX fp32 922,477 B・int8 258,248 B（exp005 比 −54%・−51%）。高速度域の評価1 13to14 の出力の平均 10.84（偏り −2.45）。results/exp012_eval.md と metrics.csv（017-*・013-fast-speech-exp012）に記録した。採否は A-4 に任せる。
+- queue_mac が 02:24 に exp011（膨張率2倍、mps、worktree SpeedMeter-wt-d）の学習を始めた。
