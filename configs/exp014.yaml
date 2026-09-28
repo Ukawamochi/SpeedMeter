@@ -18,9 +18,11 @@
 # - augment.params.time_stretch_distribution: uniform（既定）→ log_uniform
 #     （速くする側（倍率1未満）が約63%になる。exp010 と同じ実装）
 # - windows.fast_window_redraws は既定の0のまま（速い窓の選び直しは exp015 で使う）
-# - train.num_workers: 4 → 12（指示書 0節4。exp010 は num_workers 4 でデータ待ちの比率 0.74〜0.75。
-#     010 の4.4節で num_workers を変えても指標がほぼ変わらないことを確認済み。最初のエポックの
-#     データ待ちの比率と free の available（2GiB を切らない）を確かめる。docs/compute.md に記録）
+# - train.num_workers: 4 → 8（指示書 0節4。exp010 は num_workers 4 でデータ待ちの比率 0.74〜0.75。
+#     010 の4.4節で num_workers を変えても指標がほぼ変わらないことを確認済み）。
+#     最初は 12 で起動したが、ワーカーがエポックごとに作り直され1つ約1.1GB（RSS）まで育ち、
+#     free の available の10分ごとの最小が 3.5 → 2.0GiB と下がり、エポック5〜6で 1,958 MiB（2GiB 未満）、
+#     swap が 0.2 → 1.4GB に増えたため、エポック6の途中で止めて 8 でやり直した（docs/compute.md）。
 # - device: mps → cuda（ubuntu-desktop で学習する。float64・torch.compile・混合精度は使わず、
 #     TF32 は無効にする。src/spkrate/device.py）。exp007・exp008・exp010 と同じ。
 # - experiment_id と notes の文言。
@@ -75,7 +77,7 @@ train:
   learning_rate: 0.0001
   weight_decay: 0.0
   grad_clip: 5.0
-  num_workers: 12   # exp005 は 4。指示書 0節4（冒頭のコメント）
+  num_workers: 8    # exp005 は 4。指示書 0節4（冒頭のコメント。12 は available が 2GiB を切ったのでやり直した）
   bucketing: false   # 全件201フレームなので長さの整列はしない
   best_metric: mae_moras_per_sec
   log_interval: 200
