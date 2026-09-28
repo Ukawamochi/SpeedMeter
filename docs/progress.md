@@ -395,3 +395,7 @@
 ### 2026-09-28 実装: 指示書 2026-09-28-fast-speech タスク1（高速度域の評価）
 - 評価1（dev_window clean・主指標の正解の話速1刻みの区間別、既存の pred_clean.npz を再利用）と評価2（dev_fast）の集計を scripts/eval_fast_speech.py（predict/summarize、mps・cuda）に、dev_fast の作成を scripts/build_dev_fast.py に置いた。速める方式は WSOLA（audiotsm 0.1.2、依存に追加。学習の位相ボコーダとは別）。
 - dev_fast: dev_window の2,000音源（種 202609281、連続発話の組722を含む）を作成し data/processed/dev_fast/ に置いた。窓数 x1.5 46,761・x2 31,346（主指標 45,797・30,684）。記録 results/dev_fast_build.md。pytest 812件通過。ブランチ feat/fast-speech-eval（未マージ）。
+
+### 2026-09-28 測定: 指示書 2026-09-28-fast-speech タスク1（高速度域の評価）
+- 判定の基準を exp005・exp007 の区間別の差（s_bin 0.11）から決め、exp010 を見る前に results/fast_speech_eval.md 1節にコミットした（326471d）。評価2の推論は ubuntu-desktop・cuda（19:20 に空いた）、遠隔機の dev_fast は作り直しでは一致しないため送ったファイルの md5 一致で確認した。
+- 評価1 13to14 の出力の平均（正解13.28）: exp005 10.92・exp007 10.97・exp010 10.75。天井は評価1で約11（13to14）、評価2では ge14 まで増え続け x1.5 12.1・x2 12.0。exp010 は F1 で6セルとも悪化（評価1 12to13 は境目）、N1〜N5 は満たす。metrics.csv に 013-fast-speech-* 各29行。
