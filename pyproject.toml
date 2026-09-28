@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "audiotsm>=0.1.2",
     "faster-whisper>=1.2.0",
     "librosa>=1.0.0",
     "matplotlib>=3.11.2",
