@@ -37,8 +37,9 @@
 
 ## 4. 遠隔機（ubuntu-desktop）で使う
 
-- Mac から `scripts/sync_to_remote.sh --data` で送る（data/processed の下なので送られる）。送った後、遠隔機で `uv run python scripts/build_dev_fast.py --verify 20` を実行し、選んだ音源・窓の定義の一致と、先頭・末尾の20音源を作り直した波形のビット一致（`VERIFY_OK`）を確かめる。Mac では20/20でビット一致した
-- 遠隔機で作り直す場合は、空の `data/processed/dev_fast/` に対して `uv run python scripts/build_dev_fast.py` を実行する（既存の dev_fast があれば上書きせずに止まる）
+- Mac で作った dev_fast を `scripts/sync_to_remote.sh --data` で送って使う（data/processed の下なので送られる）。送った後、`data/processed/dev_fast/` の全ファイルの md5 が Mac と遠隔機で一致することを確かめる。2026-09-28 の送り出しでは全ファイルが一致した
+- 遠隔機での `build_dev_fast.py --verify 20` は、選んだ音源・窓の定義は一致するが、波形は `VERIFY_MISMATCH` になる（2026-09-28、20音源とも不一致。最大差 x1.5 0.46、x2 1.00）。入力の元の波形が Mac と遠隔機で float32 の丸めの大きさ（最大 1.8e-7）だけ違い、WSOLA のずれの探索がそれを増幅するためである。したがって、遠隔機で dev_fast を作り直さない。評価は Mac で作ったファイルだけを使う
+- `--verify` のビット一致は、同じ計算機での再現性の確認としてだけ使う（Mac では20/20で一致した）
 
 ## 5. 評価の実行（測定の担当向け）
 
