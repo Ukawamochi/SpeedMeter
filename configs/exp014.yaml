@@ -1,0 +1,83 @@
+# exp005 の時間伸縮の範囲を 0.7〜1.5 → 0.5〜1.5 に広げ、伸縮率の分布を一様 → 対数一様にした学習
+# （高速度域への対応。docs/directives/2026-09-28-fast-speech.md タスク2 の exp014。
+# ブランチ exp/019-stretch-wide）。ubuntu-desktop（cuda）で学習する。
+#
+# 実行（ubuntu-desktop の ~/SpeedMeter から）:
+#   ~/.local/bin/uv run --frozen python -m spkrate.train.train --config configs/exp014.yaml
+#
+# ## exp005（configs/exp005.yaml）との差分と理由
+#
+# 方式B（windows）・検証（dev_window_val）・学習クリップの一覧・MUSAN の学習用分割・無音サンプル・
+# モデル構造・損失(mse)・seed(20260921)・学習率(1e-4)・重み減衰(0)・勾配の上限(5.0)・バッチ(64)・
+# bucketing(false)・early_stopping_patience(5)・max_epochs(30)・best_metric、
+# 時間伸縮の確率（0.5）を含む拡張の他の設定は exp005 と同じ。違いは次のとおり。
+#
+# - augment.params.time_stretch_range: [0.7, 1.5]（既定）→ [0.5, 1.5]
+#     （指示書 0節1 の人間による仕様変更。spec「データ拡張」の新しい実験の設定の範囲。0.5倍は2倍速）。
+#     方式Bの伸縮率の下限 max(0.5, 2.0 ÷ 音源長) はそのまま適用する。
+# - augment.params.time_stretch_distribution: uniform（既定）→ log_uniform
+#     （速くする側（倍率1未満）が約63%になる。exp010 と同じ実装）
+# - windows.fast_window_redraws は既定の0のまま（速い窓の選び直しは exp015 で使う）
+# - train.num_workers: 4 → 12（指示書 0節4。exp010 は num_workers 4 でデータ待ちの比率 0.74〜0.75。
+#     010 の4.4節で num_workers を変えても指標がほぼ変わらないことを確認済み。最初のエポックの
+#     データ待ちの比率と free の available（2GiB を切らない）を確かめる。docs/compute.md に記録）
+# - device: mps → cuda（ubuntu-desktop で学習する。float64・torch.compile・混合精度は使わず、
+#     TF32 は無効にする。src/spkrate/device.py）。exp007・exp008・exp010 と同じ。
+# - experiment_id と notes の文言。
+#
+# test.json は使わない。
+
+experiment_id: exp014
+seed: 20260921       # exp005 と同じ
+device: cuda         # ubuntu-desktop で学習する
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: exp005 と同じ設定（方式B・学習クリップの絞り込み・MUSAN 学習用分割・伸縮の確率 0.5 を含む拡張・無音サンプル・seed 20260921）で、時間伸縮の範囲を 0.5〜1.5 に広げ分布を対数一様にし、cuda で学習する（高速度域への対応、指示書 2026-09-28-fast-speech タスク2 の exp014）。初期状態から、早期終了（patience 5、上限30）
+
+data:
+  source: windows                 # 方式B（spkrate.train.method_b）
+  dev_source: dev_window_val      # 検証は dev_window の抽出50,000窓（事前計算特徴量・拡張なし）
+  dev_window_val_dir: data/processed/dev_window_val
+  train_clip_list: data/processed/train_selection/usable_clip_ids.txt
+  train_alignments: data/processed/alignments/train.jsonl
+  clips_jsonl: data/processed/clips.jsonl
+  train_split: configs/splits/train.json   # test.json は使わない
+  max_train_clips: null  # 学習用の一覧の全件
+  max_dev_clips: null    # 検証窓の50,000窓全件で毎エポック評価する
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+windows:
+  window_sec: 2.0
+  margin_sec: 0.5
+  concat_group_size: [3, 5]      # configs/eval/dev_window.yaml と同じ
+  concat_gap_sec: [0.3, 1.5]
+  concat_gap_round_sec: 0.01
+
+augment:
+  enabled: true      # AugmentConfig の既定値（exp004 と同じ）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json   # MUSAN noise の学習用だけ
+  params:
+    time_stretch_range: [0.5, 1.5]           # exp005 は既定の 0.7〜1.5。冒頭のコメント
+    time_stretch_distribution: log_uniform   # exp005 は既定の uniform（params なし）
+
+silence_samples:
+  enabled: true      # それ以外は exp004 と同じ既定値（割合0.03、3種等分、-90〜-60dBFS、長さは学習入力＝2.0秒）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json
+
+train:
+  max_epochs: 30                  # 上限（初期状態からエポック1〜30）
+  early_stopping_patience: 5      # 検証の mae_moras_per_sec が5エポック連続で改善しなければ終了
+  batch_size: 64
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 12   # exp005 は 4。指示書 0節4（冒頭のコメント）
+  bucketing: false   # 全件201フレームなので長さの整列はしない
+  best_metric: mae_moras_per_sec
+  log_interval: 200
+  # results/metrics.csv への追記は学習後の評価で行う。
+  record_metrics_csv: false
