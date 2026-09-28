@@ -17,6 +17,8 @@ exp010（時間伸縮の伸縮率を対数一様にする）の学習の前に�
   ``--stretch-range`` で設定ファイルの ``augment.time_stretch_range`` を上書きできる（例 0.5 1.5）。
   名目の割合（下限で切られない場合の分布の値）も並べて出すので、4秒未満の音源で2倍速に近い
   伸縮が使えないことによる減り方が分かる
+- ``--fast-window-redraws K``（と ``--fast-window-min-rate``）で設定ファイルの ``windows`` の速い窓の
+  選び直し（docs/decisions/011-fast-window-sampling.md。exp015）を上書きし、選び直した窓の割合も出す
 
 実行例:
     uv run python scripts/epoch_window_label_distribution.py --config configs/exp005.yaml \\
@@ -30,7 +32,7 @@ import json
 import sys
 import time
 from collections import Counter
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Any
 
 import numpy as np
@@ -38,6 +40,7 @@ import numpy as np
 from spkrate.eval.dev_window import KIND_CONCAT, KIND_SINGLE
 from spkrate.eval.metrics import SPEED_BANDS, band_of
 from spkrate.train.method_b import (
+    WindowSettings,
     WindowTrainDataset,
     load_train_clips,
     read_clip_list,
@@ -148,6 +151,18 @@ def main(argv: list[str] | None = None) -> int:
         metavar=("LOW", "HIGH"),
         help="augment.time_stretch_range を上書きする（例 0.5 1.5。exp014 の見積もり）",
     )
+    parser.add_argument(
+        "--fast-window-redraws",
+        type=int,
+        default=None,
+        help="windows.fast_window_redraws を上書きする（exp015 の見積もり）",
+    )
+    parser.add_argument(
+        "--fast-window-min-rate",
+        type=float,
+        default=None,
+        help="windows.fast_window_min_rate を上書きする（毎秒モーラ数）",
+    )
     parser.add_argument("--json", default=None, help="結果を JSON で書く先")
     args = parser.parse_args(argv)
 
@@ -160,6 +175,14 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("拡張が無効の設定では --stretch-range を使えない")
         augment = replace(augment, time_stretch_range=(args.stretch_range[0], args.stretch_range[1]))
     started = time.perf_counter()
+    settings = config.windows
+    overrides: dict[str, Any] = {}
+    if args.fast_window_redraws is not None:
+        overrides["fast_window_redraws"] = int(args.fast_window_redraws)
+    if args.fast_window_min_rate is not None:
+        overrides["fast_window_min_rate"] = float(args.fast_window_min_rate)
+    if overrides:
+        settings = WindowSettings.from_mapping({**asdict(settings), **overrides})
     clip_ids = read_clip_list(config.data.train_clip_list)
     clips, starts, ends = load_train_clips(
         clip_ids,
@@ -170,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         limit=config.data.max_train_clips,
     )
     dataset = WindowTrainDataset(
-        clips, starts, ends, settings=config.windows, augment=augment, seed=config.seed
+        clips, starts, ends, settings=settings, augment=augment, seed=config.seed
     )
     dataset.set_epoch(args.epoch)
     total = len(dataset)
@@ -196,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
         "sampled": int(indices.size),
         "sample_seed": args.sample_seed,
         "stretch_range": None if augment is None else list(augment.time_stretch_range),
+        "fast_window_redraws": settings.fast_window_redraws,
+        "fast_window_min_rate": settings.fast_window_min_rate,
         "by_distribution": {},
     }
     for name in distributions:
@@ -204,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
         stretches = np.empty(indices.size, dtype=np.float32)
         drawn = np.zeros(indices.size, dtype=bool)
         cut = np.zeros(indices.size, dtype=bool)
+        redrawn = np.zeros(indices.size, dtype=bool)
         kinds: list[str] = []
         w = config.windows.window_samples
         low, high = (float(v) for v in (augment.time_stretch_range if augment else (1.0, 1.0)))
@@ -212,10 +238,12 @@ def main(argv: list[str] | None = None) -> int:
             labels[j] = label
             stretches[j] = plan.stretch
             drawn[j] = plan.stretch_drawn
+            redrawn[j] = plan.fast_redraws > 0
             cut[j] = stretch_lower_bound(low, source.num_samples, w) > low
             kinds.append(source.kind)
         summary = summarize(labels, kinds, stretches, config.windows.window_sec)
         summary["stretch"] = summarize_stretch(stretches, drawn, cut, low, high, name)
+        summary["fast_redrawn_ratio"] = float(np.mean(redrawn)) if indices.size else float("nan")
         results["by_distribution"][name] = summary
         bands = " ".join(f"{k}={v:.4f}" for k, v in summary["bands"].items())
         print(
@@ -233,7 +261,9 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"  毎秒モーラ数 {high_text} ｜ 伸縮率 範囲={st['range']} 伸縮した窓={st['stretched']} "
             f"s<1={st['below1']:.4f}(名目{st['below1_nominal']:.4f}) "
-            f"下限で切られた={st['cut_by_lower_bound']:.4f} 区間: {bins_text}",
+            f"下限で切られた={st['cut_by_lower_bound']:.4f} 区間: {bins_text} ｜ "
+            f"速い窓の選び直し K={settings.fast_window_redraws}（毎秒{settings.fast_window_min_rate:g}以上） "
+            f"選び直した窓={summary['fast_redrawn_ratio']:.4f}",
             flush=True,
         )
     if args.json:
