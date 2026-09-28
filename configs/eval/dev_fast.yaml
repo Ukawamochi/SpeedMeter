@@ -1,0 +1,29 @@
+# 速めた音声の評価セット dev_fast の定義（docs/directives/2026-09-28-fast-speech.md タスク1 評価2）。
+# 実装: src/spkrate/eval/fast_speech.py（選択・時刻の変換・窓・WSOLA）、scripts/build_dev_fast.py（作成）、
+# scripts/eval_fast_speech.py（推論・区間別の集計・metrics.csv への追記）。出力は data/processed/dev_fast/（Git管理外）
+#
+# ## 構成
+# - 音源: dev_window（configs/eval/dev_window.yaml、data/processed/dev_window/）の音源（単一クリップと
+#   連続発話の組）のうち、最も速い条件で窓を1つ以上持つもの（元の長さ >= 2.0秒 × 最大の速さ）を候補とし、
+#   default_rng(seed).permutation の先頭 num_sources 件を選ぶ。選んだ音源は全条件で共通
+# - 速める: 音源の波形全体（連続発話は無音を含む連結音声の全体）を speeds の各倍速にする
+#   （長さの倍率 1/speed、標本数 round(元の標本数 / speed)）。方式は WSOLA（audiotsm）。
+#   学習の時間伸縮（位相ボコーダ、librosa）とは別の方式
+# - 時刻の変換: モーラ時刻 t（音源内。連結では各クリップの開始位置を足した時刻）を t / speed にする
+# - 窓と正解: dev_window と同じ（2.0秒窓・0.25秒ずらし・窓全体が収まるものだけ・按分）
+# - 主指標の除外: dev_window と同じ（configs/eval/no_speech.yaml、known_no_speech と no_speech_suspect の
+#   クリップを由来に持つ窓を集計で除く）
+# - 保存: 条件ごとに sources.jsonl（dev_window と同じ形式に stretched_samples・audio_offset を加えたもの）・
+#   windows.npz・meta.json・audio.npy（選んだ音源の速めた波形を順に連結した float32 の1次元配列）
+seed: 202609281
+num_sources: 2000
+speeds: [1.5, 2.0]
+dev_window_config: configs/eval/dev_window.yaml
+output_dir: data/processed/dev_fast
+method: wsola
+wsola:
+  library: audiotsm
+  frame_length: 1024   # 64ms
+  synthesis_hop: 512   # 分析の刻みは 512 × speed（1.5倍速 768、2倍速 1024。整数でない速さは使えない）
+  tolerance: 512       # 分析の窓を動かせる最大の標本数（audiotsm の既定 frame_length // 2 と同じ）
+  pad_samples: 4096    # audiotsm が末尾を出力しない分を補うため入力の末尾に足す0の標本数
