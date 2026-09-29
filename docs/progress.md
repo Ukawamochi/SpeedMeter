@@ -436,3 +436,8 @@
 - feat/web-demo を main にマージし（20cdf90）、worktree ~/Desktop/SpeedMeter-wt-b を削除した（中の data/・runs/ は main へのシンボリックリンクだけ。リンクを外してから削除。ブランチは残す）。
 - 表示するモデルを Git で管理する一覧 web/models.txt で決める形にした（setup_web_model.py が既定で読む。8個まで・exp005 必須・一覧に無い複製は消す。tests/test_setup_web_model.py）。
 - web/README.md を使い方・モデルの追加手順・ファイル構成・変更箇所の手引きとして書き直し、ルートの README に ONNX の書き出しと web/ を書いた。pytest 844 passed、node 25件、ヘッドレス Chrome で 8 モデルの表示と check.html の照合 OK。
+
+### 2026-09-29 統括: 指示書 2026-09-29 の開始（exp016・exp017 を ubuntu の待ち行列で学習）
+- 指示書をコミットし、0節の回答を questions.md に転記した（5ce2fd1）。exp015・exp011 の設定のブランチを main にマージした。
+- 人間の指示で Mac（MPS）は使わず、ubuntu-desktop だけで進める。exp016（fast_window_redraws 1、0920c44）と exp017（silence_samples.ratio 0.06、43bc8b4）の設定を作り、待ち行列 queue2 で exp016 の学習 → 評価 → exp017 の学習 → 評価を 22:35 に始めた。
+- A-4 は Mac での推論時間の測定（0節5）が要るため、Mac が使えるようになるまで後に回す。
