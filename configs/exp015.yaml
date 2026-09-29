@@ -1,0 +1,65 @@
+# exp015（高速度域への対応、指示書 docs/directives/2026-09-28-fast-speech.md タスク2 の exp015）。
+# exp014（configs/exp014.yaml: 時間伸縮の範囲 0.5〜1.5・対数一様、num_workers 8）に加えて、学習の窓の選び方で
+# 正解が 10 mora/s 以上になる窓の出現を増やす（docs/decisions/011-fast-window-sampling.md。伸縮の抽選に当たった
+# 遅い窓の伸縮率だけを最大3回引き直す。エポックあたりの窓数・伸縮の確率 0.5・下限の規則は変えない）。
+# エポック1の窓の見積もり: 10以上 18.78%（exp014 10.45%、exp005 5.28%）。
+# ubuntu-desktop（cuda、num_workers 8）で学習する。
+#
+# exp014.yaml との差: experiment_id、notes、windows.fast_window_redraws（3）と fast_window_min_rate（10.0）だけ。
+
+experiment_id: exp015
+seed: 20260921       # exp005 と同じ
+device: cuda         # ubuntu-desktop で学習する
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: exp014 と同じ設定（時間伸縮の範囲 0.5〜1.5・対数一様）に、速い窓の選び直し（fast_window_redraws 3、正解 10 mora/s 以上）を加える（指示書 2026-09-28-fast-speech タスク2 の exp015）。cuda で学習する
+
+data:
+  source: windows                 # 方式B（spkrate.train.method_b）
+  dev_source: dev_window_val      # 検証は dev_window の抽出50,000窓（事前計算特徴量・拡張なし）
+  dev_window_val_dir: data/processed/dev_window_val
+  train_clip_list: data/processed/train_selection/usable_clip_ids.txt
+  train_alignments: data/processed/alignments/train.jsonl
+  clips_jsonl: data/processed/clips.jsonl
+  train_split: configs/splits/train.json   # test.json は使わない
+  max_train_clips: null  # 学習用の一覧の全件
+  max_dev_clips: null    # 検証窓の50,000窓全件で毎エポック評価する
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+windows:
+  window_sec: 2.0
+  margin_sec: 0.5
+  concat_group_size: [3, 5]      # configs/eval/dev_window.yaml と同じ
+  concat_gap_sec: [0.3, 1.5]
+  concat_gap_round_sec: 0.01
+  fast_window_redraws: 3        # exp014 は 0（無効）。docs/decisions/011-fast-window-sampling.md の推奨値
+  fast_window_min_rate: 10.0    # 既定値
+
+augment:
+  enabled: true      # AugmentConfig の既定値（exp004 と同じ）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json   # MUSAN noise の学習用だけ
+  params:
+    time_stretch_range: [0.5, 1.5]           # exp005 は既定の 0.7〜1.5。冒頭のコメント
+    time_stretch_distribution: log_uniform   # exp005 は既定の uniform（params なし）
+
+silence_samples:
+  enabled: true      # それ以外は exp004 と同じ既定値（割合0.03、3種等分、-90〜-60dBFS、長さは学習入力＝2.0秒）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json
+
+train:
+  max_epochs: 30                  # 上限（初期状態からエポック1〜30）
+  early_stopping_patience: 5      # 検証の mae_moras_per_sec が5エポック連続で改善しなければ終了
+  batch_size: 64
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 8    # exp005 は 4。指示書 0節4（冒頭のコメント。12 は available が 2GiB を切ったのでやり直した）
+  bucketing: false   # 全件201フレームなので長さの整列はしない
+  best_metric: mae_moras_per_sec
+  log_interval: 200
+  # results/metrics.csv への追記は学習後の評価で行う。
+  record_metrics_csv: false
