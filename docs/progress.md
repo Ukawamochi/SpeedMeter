@@ -441,3 +441,7 @@
 - 指示書をコミットし、0節の回答を questions.md に転記した（5ce2fd1）。exp015・exp011 の設定のブランチを main にマージした。
 - 人間の指示で Mac（MPS）は使わず、ubuntu-desktop だけで進める。exp016（fast_window_redraws 1、0920c44）と exp017（silence_samples.ratio 0.06、43bc8b4）の設定を作り、待ち行列 queue2 で exp016 の学習 → 評価 → exp017 の学習 → 評価を 22:35 に始めた。
 - A-4 は Mac での推論時間の測定（0節5）が要るため、Mac が使えるようになるまで後に回す。
+
+### 2026-09-29 分析: 指示書 2026-09-29 タスク1（特殊なモーラの数え落とし）
+- dev_window（clean・主指標）で、特殊拍（ー・ン・ッ）の割合が高い窓ほど過小評価が大きい傾向が4帯すべてで見られた（話速で調整、割合0.1あたり exp005 −0.04/−0.11/−0.13/−0.19 mora/s。特殊拍1つあたり約0.2モーラ相当、促音が最大）。拗音は逆に数えすぎる向き。語の平均モーラ数の効果は大部分が特殊拍で説明される。
+- exp015 でも傾向は弱まらず、8以上ではやや強い（−0.220。exp007 は −0.201）。results/special_mora_analysis.md。集計は scripts/special_mora_analysis.py（feat/special-mora-analysis、未マージ）で、exp016・exp017 にも --model で当てられる。
