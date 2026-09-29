@@ -1,0 +1,62 @@
+# exp011（条件の探索、精度の目的。docs/directives/2026-09-27.md A-3、docs/experiments/011-search-plan.md の exp011）。
+# exp005（configs/exp005.yaml）から、モデルの膨張率だけを [1, 2, 4, 8, 16] → [2, 4, 8, 16, 32] に変える
+# （configs/model/cnn_dil2x.yaml。受容野 69 → 131 フレーム。パラメータ数と計算量は同じ）。
+# 011 では ubuntu-desktop に割り当てていたが、人間の指示（2026-09-29）で Mac（mps）で学習する。
+# exp005 と同じ計算機・同じ seed なので、exp005 との差は条件だけになる。
+#
+# 実行（worktree のリポジトリ直下から）:
+#   PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m spkrate.train.train --config configs/exp011.yaml
+#
+# exp005.yaml との差: experiment_id、model_config、notes だけ（device は mps、num_workers は 4 のまま）。
+
+experiment_id: exp011
+seed: 20260921
+device: mps          # CLAUDE.md「学習デバイスはmps」
+runs_dir: runs
+model_config: configs/model/cnn_dil2x.yaml   # exp005 は cnn_base.yaml（膨張率だけが違う）
+notes: exp005 と同じ設定で、膨張率だけを [2, 4, 8, 16, 32]（受容野 131 フレーム）に変えた精度の条件（011 の exp011）。Mac の mps で学習する
+
+data:
+  source: windows                 # 方式B（spkrate.train.method_b）
+  dev_source: dev_window_val      # 検証は dev_window の抽出50,000窓（事前計算特徴量・拡張なし）
+  dev_window_val_dir: data/processed/dev_window_val
+  train_clip_list: data/processed/train_selection/usable_clip_ids.txt
+  train_alignments: data/processed/alignments/train.jsonl
+  clips_jsonl: data/processed/clips.jsonl
+  train_split: configs/splits/train.json   # test.json は使わない
+  max_train_clips: null  # 学習用の一覧の全件
+  max_dev_clips: null    # 検証窓の50,000窓全件で毎エポック評価する
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+windows:
+  window_sec: 2.0
+  margin_sec: 0.5
+  concat_group_size: [3, 5]      # configs/eval/dev_window.yaml と同じ
+  concat_gap_sec: [0.3, 1.5]
+  concat_gap_round_sec: 0.01
+
+augment:
+  enabled: true      # AugmentConfig の既定値（exp004 と同じ）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json   # MUSAN noise の学習用だけ
+
+silence_samples:
+  enabled: true      # それ以外は exp004 と同じ既定値（割合0.03、3種等分、-90〜-60dBFS、長さは学習入力＝2.0秒）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json
+
+train:
+  max_epochs: 30                  # 上限（初期状態からエポック1〜30）
+  early_stopping_patience: 5      # 検証の mae_moras_per_sec が5エポック連続で改善しなければ終了
+  batch_size: 64
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 4
+  bucketing: false   # 全件201フレームなので長さの整列はしない
+  best_metric: mae_moras_per_sec
+  log_interval: 200
+  # results/metrics.csv への追記は学習後の評価で行う。
+  record_metrics_csv: false
