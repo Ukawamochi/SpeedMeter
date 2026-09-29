@@ -33,7 +33,7 @@
   - `window_diag.py`・`low_output_diag.py`: 窓の切り出し方式・低出力事例の診断
 - `baselines/`: 比較用のベースライン（`envelope.py` 信号処理、`asr.py` 書き起こし）
 - `device.py`: 計算デバイス（mps・cuda・cpu）の選択、精度の設定（cuda の TF32 無効化）、実行した計算機とデバイスの記録
-- `export/`: ONNX 書き出し（未実装）
+- `export/to_onnx.py`: ONNX への書き出しと int8 の動的量子化（`python -m spkrate.export.to_onnx`）
 
 `scripts/` には、データの準備（`build_clips.py`、`build_splits.py`、`precompute_features.py` など）、アライメント（`align_dev.py`、`align_train.py`）、評価（`eval_dev_full.py`、`eval_dev_window.py`、`measure_latency.py`）、ベースライン（`run_envelope_baseline.py`、`run_asr_baseline.py`）、診断、環境確認（`check_env.py`）、遠隔機との転送（`sync_to_remote.sh`、`fetch_from_remote.sh`）の入口がある。設定は `configs/`（実験は `configs/exp*.yaml`、評価セットは `configs/eval/`、分割は `configs/splits/`）に置く。
 
@@ -43,7 +43,22 @@
 uv run python -m spkrate.train.train --config configs/<設定>.yaml [--device mps|cuda|cpu]
 ```
 
-ONNX 書き出しとブラウザでの動作は今後の実装対象。
+ONNX への書き出しは次の形で行う。`<出力先>` には `model_fp32.onnx`・`model_int8.onnx`・`export_meta.json` ができる。
+
+```bash
+uv run python -m spkrate.export.to_onnx --checkpoint runs/<実験>/checkpoint_best.pt --out-dir runs/onnx_<実験>
+```
+
+### ブラウザの確認用ページ（web/）
+
+書き出したモデルをブラウザで動かし、マイクの音声から話速をリアルタイムに表示して、複数のモデルを比べるページ。
+表示するモデルは `web/models.txt` で決める。使い方、モデルの追加、ファイル構成は [web/README.md](web/README.md) を参照する。
+
+```bash
+uv run python scripts/setup_web_model.py
+uv run python -m http.server -d web 8000   # http://localhost:8000 を開く
+```
+
 仕様は [docs/spec.md](docs/spec.md)、確認事項と回答は [docs/questions.md](docs/questions.md) に記録している。
 
 ## 開発環境
@@ -149,7 +164,8 @@ scripts/fetch_from_remote.sh <実行名> [<実行名またはファイル名> ..
 ## ディレクトリと文書
 
 - `src/spkrate/`: 実装（上記「現在の実装」）
-- `scripts/`: データの準備・評価・診断・環境確認・遠隔機との転送の入口
+- `scripts/`: データの準備・評価・診断・環境確認・遠隔機との転送・確認用ページのモデルの配置の入口
+- `web/`: ブラウザの確認用ページ（[web/README.md](web/README.md)）
 - `tests/`: 単体テスト
 - `configs/`: 学習・評価の設定と、`configs/splits/` の固定した分割
 - `runs/`: 学習ログの出力先（Git管理外）
