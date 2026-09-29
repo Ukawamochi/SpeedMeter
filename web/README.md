@@ -11,6 +11,15 @@ uv run python scripts/setup_web_model.py --source runs/onnx_exp005 runs/onnx_exp
 uv run python -m http.server -d web 8000
 ```
 
+2026-09-29 時点で比べているのは、学習を終えた条件の 8 モデル（exp007 は exp005 と seed だけが違うので外した）:
+
+```sh
+uv run python scripts/setup_web_model.py --source runs/onnx_exp005 runs/onnx_exp008 runs/onnx_exp009 runs/onnx_exp010 \
+  runs/onnx_exp011 runs/onnx_exp012 runs/onnx_exp014 runs/onnx_exp015
+```
+
+書き出していない実験は先に `uv run python -m spkrate.export.to_onnx --checkpoint runs/<実験>/checkpoint_best.pt --out-dir runs/onnx_<実験>`。
+
 `--source` の各 `runs/onnx_<名前>/model_fp32.onnx` を `web/models/<名前>.onnx` に置き、一覧 `web/models/models.json`
 （`--source` の順、8個まで）を書く。省略時は exp005 だけ。check.html は `exp005.onnx` を読むので exp005 を含めておく。
 
@@ -30,7 +39,7 @@ onnxruntime-web 1.30.0（wasm、1スレッド）は cdn.jsdelivr.net から読�
   切り替える（推論はチェックの有無によらず全モデルで行うので、途中でチェックを付けても線は欠けない）。色は一覧の順に固定
   （表示を切り替えても塗り替えない）。現在値は全モデル分の行を出し、チェックを外したモデルは薄くする。縦軸の上限は表示中の
   モデルの値で決める。推論の時間は全モデルの合計なので、モデルを増やして 0.25 秒に間に合わなくなると全モデルそろって間引く
-  （表示の「直近の処理」で確かめる。ヘッドレスの Chrome で 2 モデルの合計 約 80〜140 ms）。
+  （表示の「直近の処理」で確かめる。ヘッドレスの Chrome で 8 モデルの合計 約 90〜110 ms、間引き 0）。
 - 表示: モデルごとの現在の毎秒モーラ数（大きく）と、直近 30 秒の折れ線グラフ（canvas、外部ライブラリなし。縦軸は 0〜10、超えたら広げる）。
   薄い破線 4・6・8 は評価で使う話速帯の境界であり、**早口の閾値は未定義**（docs/questions.md で人間の判断待ち）。
   値は平滑化せずそのまま描く（無音の表示の定義は仕様に無い）。
