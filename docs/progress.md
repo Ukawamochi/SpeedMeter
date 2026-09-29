@@ -431,3 +431,8 @@
 ### 2026-09-29 実装: 確認用ページに学習済みの新しいモデルを追加（ユーザーの指示）
 - exp008・exp010・exp014・exp015 を ONNX に書き出した（runs/onnx_<実験>。PyTorch との差 最大 3e-8）。確認用ページの一覧を exp005・008・009・010・011・012・014・015 の 8 モデルにした（exp007 は exp005 と seed だけが違うので外した。色は 8 色まで）。
 - 現在値をモデルごとに横に並べた（feat/web-demo）。ヘッドレス Chrome で 8 モデルの合計 約 90〜110 ms・間引き 0、check.html の照合 OK。
+
+### 2026-09-29 実装: 確認用ページを main（web/）へ移す（ユーザーの指示、モノレポ構成）
+- feat/web-demo を main にマージし（20cdf90）、worktree ~/Desktop/SpeedMeter-wt-b を削除した（中の data/・runs/ は main へのシンボリックリンクだけ。リンクを外してから削除。ブランチは残す）。
+- 表示するモデルを Git で管理する一覧 web/models.txt で決める形にした（setup_web_model.py が既定で読む。8個まで・exp005 必須・一覧に無い複製は消す。tests/test_setup_web_model.py）。
+- web/README.md を使い方・モデルの追加手順・ファイル構成・変更箇所の手引きとして書き直し、ルートの README に ONNX の書き出しと web/ を書いた。pytest 844 passed、node 25件、ヘッドレス Chrome で 8 モデルの表示と check.html の照合 OK。
