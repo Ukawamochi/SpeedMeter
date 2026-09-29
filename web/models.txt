@@ -1,0 +1,13 @@
+# 確認用ページ（web/index.html）に表示するモデルの一覧。
+# 1行に1つ、ONNX の書き出し先（リポジトリ直下からのパス。中に model_fp32.onnx があること）を書く。
+# 上からの順がチェックボックスと線の色の順になる。8個まで（色の数）。exp005 は check.html の照合に使うので残す。
+# 編集したら `uv run python scripts/setup_web_model.py` を実行し、ページを再読み込みする。手順は web/README.md。
+runs/onnx_exp005   # 基準の構成（方式B）
+runs/onnx_exp008   # 損失をポアソンに
+runs/onnx_exp009   # 周波数段のチャネル数を [16, 32, 32] に（軽さ）
+runs/onnx_exp010   # 時間伸縮の伸縮率を対数一様に
+runs/onnx_exp011   # 膨張率を2倍に
+runs/onnx_exp012   # 時間段のチャネル数を 128 → 64 に（軽さ）
+runs/onnx_exp014   # 時間伸縮を範囲 0.5〜1.5・対数一様に
+runs/onnx_exp015   # exp014 + 速い窓の選び直し
+# runs/onnx_exp007 # exp005 と seed だけが違う（色が8個までなので外している）
