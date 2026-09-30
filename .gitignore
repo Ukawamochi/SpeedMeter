@@ -31,3 +31,6 @@ runs/
 
 # 確認用ページ（web/）が読むモデル。scripts/setup_web_model.py が置く（リポジトリに入れない）
 /web/models/
+
+# Claude Code の設定ディレクトリ
+.claude/
