@@ -479,32 +479,9 @@ ONNX Runtimeで、2秒窓1回の推論にかかる時間を100回測定し、平
 
 ---
 
-# 第9段階　実環境評価セットの作成
+# 第9段階　（削除）
 
-## 9-1　読み上げ用文章の準備（実装サブエージェント）
-
-評価用に読み上げる文章を20文選び、data/eval_scripts/sentences.txt に保存する。
-
-- 出典は data/jsut のテキストとする
-- モーラ数が20から40の範囲の文を選ぶ
-- 各文のカタカナ読みとモーラ数を data/eval_scripts/sentences_labeled.tsv に出力する
-- 読み変換に問題のある文（has_unconverted がTrue）は選ばない
-
-録音手順書 data/eval_scripts/README.md を作成する。内容は、録音する条件（内蔵マイク、イヤホンマイク、対面で1メートル以上離れた位置）、各条件で20文を通常・速め・かなり速めの3通りで読むこと、ファイル名の規則、言い直した場合の申告方法。
-
-完了条件: 文章、ラベル、手順書が生成されている。
-
-## 9-2　録音（人間の作業）
-
-統括Agentはここで停止し、人間に data/eval_scripts/README.md に従った録音を依頼する。録音ファイルは data/eval_real/ に配置する。言い直しや読み間違いがあった録音は、data/eval_real/notes.txt にファイル名と内容を記録してもらう。
-
-## 9-3　実環境評価（測定サブエージェント）
-
-data/eval_real/ の録音を、文単位の区間として扱い、sentences_labeled.tsv のモーラ数を正解として評価する。notes.txt に記録のあるファイルは除外する。
-
-モデル、信号処理ベースライン、書き起こしベースラインの3つを同じ条件で評価し、results/real_eval.md に条件別（マイク種別、話速）の指標を記録する。
-
-完了条件: results/real_eval.md が生成されている。
+人間の録音による実環境評価は行わない（2026-09-30、人間の決定）。目標は倍速にした音声への追従であり、評価2（dev_fast）で測る。第9段階の準備で作ったdata/eval_scripts/とscripts/record_eval.pyは残すが、使う予定はない。
 
 ---
 
@@ -522,11 +499,11 @@ JVSが data/jvs/ に配置されている場合、JVSでも同じ評価を行い
 
 ## 10-2　総括（判断サブエージェント）
 
-results/final_eval.md、results/real_eval.md、results/inference_speed.md を読み、docs/experiments/006-summary.md に次を書く。
+results/final_eval.md、results/inference_speed.md、倍速にした音声での評価（評価2、results/fast_speech_eval.md）を読み、docs/experiments/006-summary.md に次を書く。
 
 - 3手法の比較表
 - 第3段階で設定した目標値の達成状況
-- 話速帯別、マイク条件別の弱点
+- 話速帯別の弱点と、倍速にした音声への追従の程度
 - ブラウザ実装へ渡せる状態か（モデルサイズと推論時間の観点）
 - 残っている課題
 
@@ -540,8 +517,7 @@ results/final_eval.md、results/real_eval.md、results/inference_speed.md を読
 
 1. データセットの取得と配置（手動）
 2. 第6段階6-3: 誤り事例の音声を聴いて原因を分類する
-3. 第9段階9-2: 評価用音声を録音し、言い直しを申告する
-4. 各段階の判断サブエージェントの結論に対する承認（承認しない場合のみ介入する）
+3. 各段階の判断サブエージェントの結論に対する承認（承認しない場合のみ介入する）
 
 ## 現在のデータ配置状況
 
