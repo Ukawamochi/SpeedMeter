@@ -140,7 +140,7 @@ class ClipItem:
         kind: 方式Bの窓の種類（``single`` / ``concat``。spkrate.train.method_b）。
             方式Aのクリップと無音サンプルでは空。
         stretch: 方式Bの窓の伸縮率（伸縮なしは1.0）。
-        special_ratio: 方式Bの窓の特殊拍（ー・ン・ッ）の割合（按分後。正解0の窓・無音サンプル・
+        special_ratio: 方式Bの窓の特殊拍（ー・ン・ッ）の割合（按分後。正解1.0モーラ未満の窓・無音サンプル・
             方式Aのクリップでは0。docs/decisions/013-special-mora-loss-weight.md）。
     """
 

@@ -34,7 +34,7 @@
 - 窓の特殊拍の割合（docs/decisions/013-special-mora-loss-weight.md。exp020）: モーラごとの特殊拍の印
   （``load_train_clips(..., with_special=True)``。アライメントのかなから読み込み時に1回だけ求める）を
   渡すと、窓の正解と同じ時刻の変換と按分で特殊拍のモーラ数を数え、割合を ``ClipItem.special_ratio``
-  に入れる。乱数は使わないので、窓の取り方・拡張の系列は変わらない。損失の重みは学習ループで掛ける
+  に入れる（正解1.0モーラ未満の窓は0）。乱数は使わないので、窓の取り方・拡張の系列は変わらない。損失の重みは学習ループで掛ける
 
 モーラ区間は ``data/processed/alignments/train.jsonl``（dev.jsonl と同じ形式）から読み、
 クリップ全体を連結した float32 配列と開始位置で持つ（DataLoader のワーカーへの受け渡しを
@@ -74,6 +74,7 @@ from spkrate.eval.dev_window import (
 from spkrate.features.melspec import MEL_DEFAULTS, LogMelSpectrogram
 from spkrate.train.data import ClipItem, Normalizer
 from spkrate.train.special_mora import (
+    MIN_LABEL_MORA,
     RATIO_BIN_COUNT,
     is_special_mora,
     ratio_bin,
@@ -782,9 +783,9 @@ class WindowTrainDataset(Dataset):
         self, source: WindowSource, starts: np.ndarray, ends: np.ndarray,
         excerpt_start: int, stretch: float, window_start: int, label: float,
     ) -> float:
-        """窓の特殊拍の割合（印が無い・正解0なら0）。"""
+        """窓の特殊拍の割合（印が無い・正解が1.0モーラ未満なら0。special_mora.special_ratio）。"""
         special = self.source_special(source)
-        if special is None or not float(label) > 0.0:
+        if special is None or not float(label) >= MIN_LABEL_MORA:
             return 0.0
         count = stretched_window_special(
             starts,
