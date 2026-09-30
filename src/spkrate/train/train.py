@@ -1251,7 +1251,11 @@ def _train_one_epoch(
                 augment_counts[name] = augment_counts.get(name, 0) + 1
         if any(batch.kinds):
             window_stats.update(
-                batch.kinds, batch.stretches, batch.moras.tolist(), batch.durations.tolist()
+                batch.kinds,
+                batch.stretches,
+                batch.moras.tolist(),
+                batch.durations.tolist(),
+                applied=batch.augment_applied,
             )
         batch = batch.to(device)
         prediction = model(batch.features, batch.lengths)

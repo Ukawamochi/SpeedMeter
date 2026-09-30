@@ -733,6 +733,11 @@ class AugmentConfig:
     noise_enabled: bool = True
     noise_prob: float = 0.5
     snr_db_range: tuple[float, float] = (0.0, 20.0)
+    # 強く縮めた窓に雑音を重ねない閾値（docs/decisions/012-no-noise-on-strong-stretch.md。exp019）。
+    # None で無効（既定。従来の挙動）。値 t を与えると、伸縮率（長さの倍率）が t 未満の音声には
+    # 雑音重畳の抽選に当たっても雑音を足さない。抽選・SNR・雑音の選択の乱数は省く場合も同じだけ
+    # 消費するので、それ以外の音声の拡張と後続の乱数の系列は無効のときと同じになる
+    noise_skip_stretch_below: float | None = None
 
     # 帯域制限
     band_limit_enabled: bool = True
@@ -774,7 +779,25 @@ class AugmentConfig:
                 "time_stretch_distribution は "
                 f"{TIME_STRETCH_DISTRIBUTIONS} のいずれか: {config.time_stretch_distribution!r}"
             )
+        threshold = config.noise_skip_stretch_below
+        if threshold is not None:
+            if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+                raise ValueError(
+                    f"noise_skip_stretch_below は数値か null: {threshold!r}"
+                )
+            threshold = float(threshold)
+            # 1 を超えると伸縮しない音声（伸縮率1.0）まで雑音を省くことになるので認めない
+            if not math.isfinite(threshold) or not 0.0 < threshold <= 1.0:
+                raise ValueError(
+                    f"noise_skip_stretch_below は 0 より大きく 1 以下: {threshold!r}"
+                )
+            config = replace(config, noise_skip_stretch_below=threshold)
         return config
+
+    def skips_noise(self, stretch: float) -> bool:
+        """伸縮率 ``stretch`` の音声で雑音重畳を省くか（``noise_skip_stretch_below`` 未満なら省く）。"""
+        threshold = self.noise_skip_stretch_below
+        return threshold is not None and float(stretch) < float(threshold)
 
     def disabled(self) -> "AugmentConfig":
         """すべての適用確率を0にした設定（対照実験用）。"""
@@ -800,6 +823,10 @@ class AugmentResult:
     変えた拡張である。``effective`` からは、伸縮率がちょうど1.0の時間伸縮、無響の応答に
     なった残響、無音で雑音を足さなかった雑音重畳、フィルタを掛けなかった帯域制限、
     利得0dBの音量変化を除く。
+
+    ``skipped`` は抽選に当たったが規則で省いた拡張である（今は ``noise`` だけ。
+    ``AugmentConfig.noise_skip_stretch_below``）。省いた拡張は ``applied`` にも
+    ``effective`` にも入れない。
     """
 
     samples: np.ndarray
@@ -807,6 +834,7 @@ class AugmentResult:
     applied: tuple[str, ...] = field(default_factory=tuple)
     params: dict[str, float] = field(default_factory=dict)
     effective: tuple[str, ...] = field(default_factory=tuple)
+    skipped: tuple[str, ...] = field(default_factory=tuple)
 
     def mora_count(self, mora_count: float) -> float:
         """拡張後のモーラ数。**どの拡張でも不変**。"""
@@ -826,6 +854,7 @@ def augment_waveform(
     *,
     config: AugmentConfig = AugmentConfig(),
     noise_source: NoiseSource | None = None,
+    applied_stretch: float = 1.0,
 ) -> AugmentResult:
     """波形に拡張を適用する。
 
@@ -835,6 +864,13 @@ def augment_waveform(
 
     ``noise_source`` を渡さない場合、雑音重畳は行わない（MUSAN が無い環境でも動く）。
     個別の ``*_enabled`` が ``False`` の拡張は適用せず、その拡張の抽選も行わない。
+
+    ``applied_stretch`` は、呼び出し側が ``samples`` に既に掛けた時間伸縮の伸縮率
+    （方式Bは窓の位置と一緒に自前で伸縮してから、時間伸縮を無効にした設定で呼ぶ）。
+    雑音を省く規則（``config.noise_skip_stretch_below``）だけに使い、伸縮率は
+    ``applied_stretch`` とこの関数で引いた伸縮率の積（全体の長さの倍率）で判定する。
+    省く場合も、雑音重畳の抽選・SNR・雑音の選択（``noise_source.sample``）の乱数は
+    同じだけ消費し、結果を捨てる。したがって後続の拡張の乱数の系列は省かない場合と同じ。
 
     Returns:
         ``AugmentResult``。ラベルの読み替えは ``mora_count`` と ``mora_per_second`` を使う。
@@ -870,6 +906,7 @@ def augment_waveform(
         if rir.size > 1:  # [1.0] は無響の応答（実現できない組）
             effective.append("reverb")
 
+    skipped: list[str] = []
     if (
         config.noise_enabled
         and noise_source is not None
@@ -877,11 +914,15 @@ def augment_waveform(
     ):
         snr_db = _uniform(rng, config.snr_db_range)
         noise = noise_source.sample(waveform.size, rng)
-        waveform, noise_added = _add_noise(waveform, noise, snr_db)
-        applied.append("noise")
-        if noise_added:
-            effective.append("noise")
-        params["snr_db"] = snr_db
+        if config.skips_noise(float(applied_stretch) * stretch):
+            # 乱数は消費済み（抽選・SNR・雑音の選択）。雑音だけを足さない
+            skipped.append("noise")
+        else:
+            waveform, noise_added = _add_noise(waveform, noise, snr_db)
+            applied.append("noise")
+            if noise_added:
+                effective.append("noise")
+            params["snr_db"] = snr_db
 
     if config.band_limit_enabled and rng.random() < config.band_limit_prob:
         low_hz = _uniform(rng, config.low_hz_range)
@@ -913,6 +954,7 @@ def augment_waveform(
         applied=tuple(applied),
         params=params,
         effective=tuple(effective),
+        skipped=tuple(skipped),
     )
 
 
@@ -1183,7 +1225,13 @@ def describe_augment_config(
         f"部屋={span('room_x_range')}×{span('room_y_range')}×{span('room_z_range')}m "
         f"最大反射次数={config.reverb_max_order}",
         f"拡張: 雑音重畳 確率={config.noise_prob:g} SNR={span('snr_db_range')}dB "
-        f"雑音源={noise_description}",
+        f"雑音源={noise_description}"
+        + (
+            ""
+            if config.noise_skip_stretch_below is None
+            else f" 伸縮率{config.noise_skip_stretch_below:g}未満の音声には重ねない"
+            "（noise_skip_stretch_below）"
+        ),
         f"拡張: 帯域制限 確率={config.band_limit_prob:g} 低域遮断={span('low_hz_range')}Hz "
         f"高域遮断={span('high_hz_range')}Hz 次数={config.band_limit_order}",
         f"拡張: 音量変化 確率={config.volume_prob:g} 利得={span('gain_db_range')}dB",
@@ -1237,7 +1285,8 @@ def estimate_application_rates(
 
     - 時間伸縮: 引いた伸縮率がちょうど1.0
     - 残響: 引いた部屋の寸法と RT60 の組が実現できず、無響の応答 ``[1.0]`` になる
-    - 雑音重畳: 雑音源が無い（``noise_available=False``）
+    - 雑音重畳: 雑音源が無い（``noise_available=False``）、または引いた伸縮率が
+      ``noise_skip_stretch_below`` 未満（方式Aの経路。方式Bの伸縮率の下限は音源長で上がるので近似）
     - 帯域制限: 引いた低域遮断が0以下かつ高域遮断がナイキスト周波数以上
     - 音量変化: 引いた利得がちょうど0dB
     - 周波数マスク: どのマスクの幅も0
@@ -1263,11 +1312,13 @@ def estimate_application_rates(
     counts = {name: 0 for name, _ in AUGMENTATIONS}
     selected = {name: 0 for name, _ in AUGMENTATIONS}
     for _ in range(int(num_trials)):
+        stretch = 1.0
         if enabled["time_stretch"] and rng.random() < config.time_stretch_prob:
             selected["time_stretch"] += 1
-            if draw_time_stretch(
+            stretch = draw_time_stretch(
                 rng, *config.time_stretch_range, config.time_stretch_distribution
-            ) != 1.0:
+            )
+            if stretch != 1.0:
                 counts["time_stretch"] += 1
         if enabled["reverb"] and rng.random() < config.reverb_prob:
             selected["reverb"] += 1
@@ -1283,7 +1334,8 @@ def estimate_application_rates(
         if enabled["noise"] and rng.random() < config.noise_prob:
             selected["noise"] += 1
             _uniform(rng, config.snr_db_range)
-            counts["noise"] += 1
+            if not config.skips_noise(stretch):
+                counts["noise"] += 1
         if enabled["band_limit"] and rng.random() < config.band_limit_prob:
             selected["band_limit"] += 1
             low_hz = _uniform(rng, config.low_hz_range)
