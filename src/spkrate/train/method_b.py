@@ -31,6 +31,10 @@
   閾値未満なら、雑音重畳の抽選に当たっても雑音を足さない。抽選・SNR・雑音の選択の乱数は同じだけ
   消費するので、他の窓と、同じ窓の後続の拡張（帯域制限・音量・周波数マスク）の系列は無効のときと同じ。
   省いた窓は ``ClipItem.augment_applied`` に ``noise_skipped`` の印を入れ、エポックの集計に数える
+- 窓の特殊拍の割合（docs/decisions/013-special-mora-loss-weight.md。exp020）: モーラごとの特殊拍の印
+  （``load_train_clips(..., with_special=True)``。アライメントのかなから読み込み時に1回だけ求める）を
+  渡すと、窓の正解と同じ時刻の変換と按分で特殊拍のモーラ数を数え、割合を ``ClipItem.special_ratio``
+  に入れる（正解1.0モーラ未満の窓は0）。乱数は使わないので、窓の取り方・拡張の系列は変わらない。損失の重みは学習ループで掛ける
 
 モーラ区間は ``data/processed/alignments/train.jsonl``（dev.jsonl と同じ形式）から読み、
 クリップ全体を連結した float32 配列と開始位置で持つ（DataLoader のワーカーへの受け渡しを
@@ -69,6 +73,13 @@ from spkrate.eval.dev_window import (
 )
 from spkrate.features.melspec import MEL_DEFAULTS, LogMelSpectrogram
 from spkrate.train.data import ClipItem, Normalizer
+from spkrate.train.special_mora import (
+    MIN_LABEL_MORA,
+    RATIO_BIN_COUNT,
+    is_special_mora,
+    ratio_bin,
+    special_ratio,
+)
 
 __all__ = [
     "CONCAT_SEED_TAG",
@@ -89,6 +100,7 @@ __all__ = [
     "WindowEpochStats",
     "stretch_lower_bound",
     "stretched_window_label",
+    "stretched_window_special",
     "window_start_in_excerpt",
 ]
 
@@ -345,6 +357,34 @@ def stretched_window_label(
     return np.float32(window_mora(starts, ends, t0, window_sec)[0])
 
 
+def stretched_window_special(
+    mora_starts: np.ndarray,
+    mora_ends: np.ndarray,
+    special: np.ndarray,
+    *,
+    excerpt_start: int,
+    stretch: float,
+    window_start: int,
+    window_sec: float,
+    sample_rate: int = SAMPLE_RATE,
+) -> np.float32:
+    """窓の按分後の特殊拍のモーラ数（``stretched_window_label`` を特殊拍のモーラだけで数えた値）。
+
+    各モーラの窓内の割合 f は正解と同じなので、特殊拍の f の和 ÷ 正解 が窓の特殊拍の割合になる
+    （scripts/special_mora_analysis.py と同じ数え方）。
+    """
+    mask = np.asarray(special, dtype=bool)
+    return stretched_window_label(
+        np.asarray(mora_starts, dtype=np.float32)[mask],
+        np.asarray(mora_ends, dtype=np.float32)[mask],
+        excerpt_start=excerpt_start,
+        stretch=stretch,
+        window_start=window_start,
+        window_sec=window_sec,
+        sample_rate=sample_rate,
+    )
+
+
 # --------------------------------------------------------------------------------------
 # 抜粋の組み立て
 
@@ -429,7 +469,10 @@ def load_train_clips(
     alignments_path: str | Path,
     sample_rate: int = SAMPLE_RATE,
     limit: int | None = None,
-) -> tuple[list[TrainClip], np.ndarray, np.ndarray]:
+    with_special: bool = False,
+) -> tuple[list[TrainClip], np.ndarray, np.ndarray] | tuple[
+    list[TrainClip], np.ndarray, np.ndarray, np.ndarray
+]:
     """一覧の clip_id について、音声のパス・話者・標本数・モーラ区間を読む。
 
     ``limit`` を与えると、一覧を (client_id, clip_id) の順に並べた先頭 ``limit`` 件だけを使う
@@ -440,6 +483,8 @@ def load_train_clips(
 
     Returns:
         (クリップの列（一覧の順）, 全モーラの開始秒, 全モーラの終了秒)。後の2つは float32。
+        ``with_special`` が真なら、4つ目に全モーラの特殊拍の印（bool。アライメントの ``kana``
+        が ー・ン・ッ の1文字。docs/decisions/013-special-mora-loss-weight.md）を加える。
     """
     from spkrate.data.splits import load_clip_records, load_split
 
@@ -487,6 +532,7 @@ def load_train_clips(
     clips: list[TrainClip] = []
     starts: list[float] = []
     ends: list[float] = []
+    special: list[bool] = []
     for clip_id in wanted:
         row = rows[clip_id]
         record = records[clip_id]
@@ -503,7 +549,12 @@ def load_train_clips(
         )
         starts.extend(float(m["start"]) for m in moras)
         ends.extend(float(m["end"]) for m in moras)
-    return clips, np.asarray(starts, dtype=np.float32), np.asarray(ends, dtype=np.float32)
+        if with_special:
+            special.extend(is_special_mora(str(m["kana"])) for m in moras)
+    arrays = (np.asarray(starts, dtype=np.float32), np.asarray(ends, dtype=np.float32))
+    if with_special:
+        return clips, *arrays, np.asarray(special, dtype=bool)
+    return clips, *arrays
 
 
 # --------------------------------------------------------------------------------------
@@ -585,12 +636,19 @@ class WindowTrainDataset(Dataset):
         seed: int = 0,
         mel_config: Any = MEL_DEFAULTS,
         loader: Callable[[str], np.ndarray] | None = None,
+        mora_special: np.ndarray | None = None,
     ) -> None:
         if not clips:
             raise ValueError("クリップが1件も無い")
         self.clips = list(clips)
         self.mora_starts = np.asarray(mora_starts, dtype=np.float32)
         self.mora_ends = np.asarray(mora_ends, dtype=np.float32)
+        # モーラごとの特殊拍の印（None なら窓の特殊拍の割合を求めず0とする）
+        self.mora_special = None if mora_special is None else np.asarray(mora_special, dtype=bool)
+        if self.mora_special is not None and self.mora_special.shape != self.mora_starts.shape:
+            raise ValueError(
+                f"特殊拍の印の数がモーラ数と違う: {self.mora_special.shape} != {self.mora_starts.shape}"
+            )
         self.audio_root = Path(audio_root)
         self.settings = settings
         self.normalizer = normalizer
@@ -709,6 +767,38 @@ class WindowTrainDataset(Dataset):
             return np.zeros(0, np.float32), np.zeros(0, np.float32)
         return np.concatenate(starts).astype(np.float32), np.concatenate(ends).astype(np.float32)
 
+    def source_special(self, source: WindowSource) -> np.ndarray | None:
+        """音源内の全モーラの特殊拍の印（``source_moras`` と同じ順）。印が無ければ None。"""
+        if self.mora_special is None:
+            return None
+        parts = []
+        for clip_id in source.clip_ids:
+            clip = self.clips[self._index[clip_id]]
+            parts.append(self.mora_special[clip.mora_offset : clip.mora_offset + clip.mora_count])
+        if not parts:
+            return np.zeros(0, dtype=bool)
+        return np.concatenate(parts).astype(bool)
+
+    def _special_ratio(
+        self, source: WindowSource, starts: np.ndarray, ends: np.ndarray,
+        excerpt_start: int, stretch: float, window_start: int, label: float,
+    ) -> float:
+        """窓の特殊拍の割合（印が無い・正解が1.0モーラ未満なら0。special_mora.special_ratio）。"""
+        special = self.source_special(source)
+        if special is None or not float(label) >= MIN_LABEL_MORA:
+            return 0.0
+        count = stretched_window_special(
+            starts,
+            ends,
+            special,
+            excerpt_start=excerpt_start,
+            stretch=stretch,
+            window_start=window_start,
+            window_sec=self.settings.window_sec,
+            sample_rate=self.settings.sample_rate,
+        )
+        return special_ratio(float(count), float(label))
+
     def _load_clip(self, clip_id: str) -> np.ndarray:
         clip = self.clips[self._index[clip_id]]
         if self.loader is not None:
@@ -767,12 +857,16 @@ class WindowTrainDataset(Dataset):
             window_sec=settings.window_sec,
             sample_rate=settings.sample_rate,
         )
+        ratio = self._special_ratio(
+            source, starts, ends, plan.excerpt_start, plan.stretch, k, float(label)
+        )
         return {
             "source": source,
             "plan": plan,
             "excerpt_window_start": k,
             "waveform": waveform,
             "mora": label,
+            "special_ratio": ratio,
             "applied": applied,
             "rng": rng,
         }
@@ -792,14 +886,32 @@ class WindowTrainDataset(Dataset):
         starts, ends = self.source_moras(source)
         return self._plan_label(plan, starts, ends), plan, source
 
-    def _plan_label(self, plan: WindowPlan, starts: np.ndarray, ends: np.ndarray) -> float:
-        """窓の取り方から、音声を読まずに正解モーラ数を求める（``window`` の ``mora`` と同じ値）。"""
-        settings = self.settings
-        w_samples = settings.window_samples
+    def window_special_ratio(self, index: int) -> tuple[float, float, WindowPlan]:
+        """index 番目の窓の正解と特殊拍の割合を、音声を読まずに求める（``window`` と同じ値）。
+
+        Returns:
+            (窓の正解モーラ数, 窓の特殊拍の割合, 窓の取り方)
+        """
+        source = self.source(index)
+        _, plan = self._draw_plan(index, source)
+        starts, ends = self.source_moras(source)
+        label = self._plan_label(plan, starts, ends)
+        k = self._plan_window_start(plan)
+        ratio = self._special_ratio(source, starts, ends, plan.excerpt_start, plan.stretch, k, label)
+        return label, ratio, plan
+
+    def _plan_window_start(self, plan: WindowPlan) -> int:
+        """窓の取り方から、伸縮後の抜粋内の窓の開始 k を求める（音声を読まない）。"""
+        w_samples = self.settings.window_samples
         length = plan.excerpt_end - plan.excerpt_start
         if plan.stretch != 1.0:
             length = int(round(length * plan.stretch))
-        k = window_start_in_excerpt(plan.start, plan.excerpt_start, plan.stretch, length, w_samples)
+        return window_start_in_excerpt(plan.start, plan.excerpt_start, plan.stretch, length, w_samples)
+
+    def _plan_label(self, plan: WindowPlan, starts: np.ndarray, ends: np.ndarray) -> float:
+        """窓の取り方から、音声を読まずに正解モーラ数を求める（``window`` の ``mora`` と同じ値）。"""
+        settings = self.settings
+        k = self._plan_window_start(plan)
         label = stretched_window_label(
             starts,
             ends,
@@ -874,6 +986,7 @@ class WindowTrainDataset(Dataset):
             augment_applied=tuple(applied),
             kind=source.kind,
             stretch=float(plan.stretch),
+            special_ratio=float(info["special_ratio"]),
         )
 
     def __getstate__(self) -> dict[str, Any]:
@@ -904,6 +1017,15 @@ class WindowEpochStats:
     # （docs/decisions/012-no-noise-on-strong-stretch.md）。applied を渡した update だけで数える
     noise: int = 0
     noise_skipped: int = 0
+    # 窓の特殊拍の割合（docs/decisions/013-special-mora-loss-weight.md）。special_ratios を渡した
+    # update だけで数える。区間は 0.1 刻み（special_mora.ratio_bin）
+    special_count: int = 0
+    special_sum: float = 0.0
+    special_bins: Counter = field(default_factory=Counter)
+    # 窓の損失の重み（013。無効のときは重みを渡さず、as_dict では1とする）
+    weight_count: int = 0
+    weight_sum: float = 0.0
+    weight_max: float = -math.inf
 
     def update(
         self,
@@ -912,11 +1034,14 @@ class WindowEpochStats:
         moras: Iterable[float],
         durations: Iterable[float],
         applied: Iterable[Sequence[str]] | None = None,
+        special_ratios: Iterable[float] | None = None,
+        weights: Iterable[float] | None = None,
     ) -> None:
         """種類が空の件（方式Aのクリップ・無音サンプル）は数えない。
 
         ``applied`` は件ごとの ``ClipItem.augment_applied``（``Batch.augment_applied``）。
-        渡したときだけ雑音を重ねた窓・省いた窓を数える。
+        渡したときだけ雑音を重ねた窓・省いた窓を数える。``special_ratios``（``Batch.special_ratios``）
+        と ``weights``（件ごとの損失の重み）も渡したときだけ数える。
         """
         from spkrate.eval.metrics import band_of
 
@@ -924,12 +1049,27 @@ class WindowEpochStats:
         names_per_item: Iterable[Sequence[str]] = (
             [()] * len(kinds) if applied is None else applied
         )
-        for kind, s, m, d, names in zip(
-            kinds, stretches, moras, durations, names_per_item, strict=True
+        ratio_per_item: Iterable[float | None] = (
+            [None] * len(kinds) if special_ratios is None else special_ratios
+        )
+        weight_per_item: Iterable[float | None] = (
+            [None] * len(kinds) if weights is None else weights
+        )
+        for kind, s, m, d, names, ratio, weight in zip(
+            kinds, stretches, moras, durations, names_per_item, ratio_per_item, weight_per_item,
+            strict=True,
         ):
             if not kind:
                 continue
             self.total += 1
+            if ratio is not None:
+                self.special_count += 1
+                self.special_sum += float(ratio)
+                self.special_bins[ratio_bin(float(ratio))] += 1
+            if weight is not None:
+                self.weight_count += 1
+                self.weight_sum += float(weight)
+                self.weight_max = max(self.weight_max, float(weight))
             if "noise" in names:
                 self.noise += 1
             if NOISE_SKIPPED in names:
@@ -968,7 +1108,25 @@ class WindowEpochStats:
             "window_noise_rate": self.noise / total if total else float("nan"),
             "window_noise_skipped": self.noise_skipped,
             "window_noise_skipped_rate": self.noise_skipped / total if total else float("nan"),
+            **self._special_dict(),
         }
+
+    def _special_dict(self) -> dict[str, Any]:
+        n = self.special_count
+        out: dict[str, Any] = {
+            "window_special_ratio_mean": self.special_sum / n if n else float("nan"),
+        }
+        for b in range(RATIO_BIN_COUNT):
+            out[f"window_special_ratio_bin{b:02d}"] = (
+                self.special_bins.get(b, 0) / n if n else float("nan")
+            )
+        if self.weight_count:
+            out["window_loss_weight_mean"] = self.weight_sum / self.weight_count
+            out["window_loss_weight_max"] = self.weight_max
+        else:  # 重みを掛けていない（無効）
+            out["window_loss_weight_mean"] = 1.0
+            out["window_loss_weight_max"] = 1.0
+        return out
 
     def describe(self, epoch: int) -> str:
         d = self.as_dict()
@@ -981,5 +1139,12 @@ class WindowEpochStats:
             f"{d['window_band_6to8']}/{d['window_band_over8']} "
             f"毎秒10/12/14以上={d['window_rate_ge10']}/{d['window_rate_ge12']}/{d['window_rate_ge14']} "
             f"雑音を重ねた窓={d['window_noise']}({d['window_noise_rate']:.4f}) "
-            f"雑音を省いた窓={d['window_noise_skipped']}({d['window_noise_skipped_rate']:.4f})"
+            f"雑音を省いた窓={d['window_noise_skipped']}({d['window_noise_skipped_rate']:.4f}) "
+            f"特殊拍の割合の平均={d['window_special_ratio_mean']:.4f} "
+            "特殊拍の割合の分布(0.1刻み)="
+            + "/".join(
+                f"{d[f'window_special_ratio_bin{b:02d}']:.4f}" for b in range(RATIO_BIN_COUNT)
+            )
+            + f" 損失の重み(平均/最大)={d['window_loss_weight_mean']:.4f}/"
+            f"{d['window_loss_weight_max']:.4f}"
         )

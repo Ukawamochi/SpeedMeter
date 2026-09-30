@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import math
 import zlib
 from dataclasses import replace
 from pathlib import Path
@@ -278,7 +279,8 @@ def test_window_epoch_stats_counts_noise_and_skipped() -> None:
     assert p["window_noise"] == 0 and p["window_noise_skipped"] == 0
     for key, value in p.items():
         if not key.startswith("window_noise"):
-            assert d[key] == value
+            # 特殊拍の割合は special_ratios を渡さないと nan（013）
+            assert d[key] == value or (math.isnan(d[key]) and math.isnan(value))
     assert "雑音を重ねた窓=1(0.3333) 雑音を省いた窓=1(0.3333)" in stats.describe(1)
 
 

@@ -38,6 +38,14 @@ docs/decisions/005-window-strategy.md の方式Aで学習する。1件の入力�
 損失の値を比べるときは、この定数ぶんだけ二乗誤差と尺度が違う**点に注意する
 （比較に使う指標は ``metrics.jsonl`` の毎秒モーラ数MAEであって損失の値ではない）。
 
+## 特殊拍の多い窓の損失の重み（docs/decisions/013-special-mora-loss-weight.md。exp020）
+
+``train.special_mora_weight_alpha``（α、既定0で無効）を正にすると、方式B（``data.source=windows``）の
+学習で、二乗誤差に窓ごとの重み w = min(1 + α · r, ``train.special_mora_weight_max``) ÷ バッチ内の平均
+を掛ける（r は窓の特殊拍の割合。無音サンプルは r = 0）。バッチ内で平均1に正規化するので、損失の
+尺度（学習率の実質）は変わらない。``loss: mse`` のときだけ使える。無効のときは重みを掛けず、損失の
+値と乱数の系列は従来と同じ。検証の損失（``val_loss``）には重みを掛けない。
+
 ## デバイスとMPS
 
 学習デバイスは ``mps`` または ``cuda``（docs/directives/2026-09-26-rtx3060.md 0節2）、float64・
@@ -221,6 +229,11 @@ from spkrate.train.silence import (
     describe_silence_counts,
     is_silence_clip,
 )
+from spkrate.train.special_mora import (
+    special_mora_weights,
+    validate_weight_settings,
+    weighted_mse_loss,
+)
 
 __all__ = [
     "AugmentSettings",
@@ -383,6 +396,9 @@ class TrainSettings:
             へ個別にチェックポイントを保存するか。既定 ``True``。``checkpoint_last.pt`` /
             ``checkpoint_best.pt`` の保存とは独立（docstring「エポックごとの個別
             チェックポイント保存」を参照）。
+        special_mora_weight_alpha: 特殊拍の多い窓の損失の重みの傾き α（0以上。既定0で無効。
+            docstring「特殊拍の多い窓の損失の重み」）。
+        special_mora_weight_max: 生の重み 1 + α · r の上限（1以上。既定3.0）。
     """
 
     epochs: int = 10
@@ -403,6 +419,8 @@ class TrainSettings:
     record_metrics_csv: bool = False
     metrics_csv: str = "results/metrics.csv"
     save_every_epoch: bool = True
+    special_mora_weight_alpha: float = 0.0
+    special_mora_weight_max: float = 3.0
 
     @classmethod
     def from_mapping(cls, mapping: dict[str, Any] | None) -> "TrainSettings":
@@ -426,6 +444,17 @@ class TrainSettings:
             raise ValueError(
                 f"early_stopping_min_delta は0以上: {self.early_stopping_min_delta}"
             )
+        validate_weight_settings(self.special_mora_weight_alpha, self.special_mora_weight_max)
+        if self.special_mora_weighting and self.loss != "mse":
+            raise ValueError(
+                "train.special_mora_weight_alpha（特殊拍の多い窓の損失の重み）は loss: mse でだけ使える: "
+                f"{self.loss}"
+            )
+
+    @property
+    def special_mora_weighting(self) -> bool:
+        """特殊拍の多い窓の損失の重みが有効か（α > 0）。"""
+        return float(self.special_mora_weight_alpha) > 0.0
 
     @property
     def resolved_max_epochs(self) -> int:
@@ -983,18 +1012,21 @@ def _build_window_dataset(
             "data.source=windows には data.train_clip_list（学習に使う clip_id の一覧）が必要"
         )
     clip_ids = read_clip_list(config.data.train_clip_list)
-    clips, starts, ends = load_train_clips(
+    # 特殊拍の印は窓の特殊拍の割合（集計と損失の重み。013）に使う。乱数は使わない
+    clips, starts, ends, special = load_train_clips(
         clip_ids,
         clips_jsonl=config.data.clips_jsonl,
         train_split=config.data.train_split,
         alignments_path=config.data.train_alignments,
         sample_rate=config.windows.sample_rate,
         limit=config.data.max_train_clips,
+        with_special=True,
     )
     dataset = WindowTrainDataset(
         clips,
         starts,
         ends,
+        mora_special=special,
         audio_root=config.data.audio_root,
         settings=config.windows,
         normalizer=normalizer,
@@ -1219,6 +1251,14 @@ def describe_epoch_augment_counts(
     return f"エポック{epoch} 拡張の実適用回数（学習{num_clips}件中）: " + " ".join(parts)
 
 
+def _batch_special_ratios(batch: Batch) -> list[float]:
+    """バッチの件ごとの特殊拍の割合（無い件は0）。"""
+    ratios = tuple(getattr(batch, "special_ratios", ()))
+    if len(ratios) == len(batch):
+        return [float(r) for r in ratios]
+    return [0.0] * len(batch)
+
+
 def _train_one_epoch(
     model: SpeechRateCNN,
     loader: DataLoader,
@@ -1234,6 +1274,8 @@ def _train_one_epoch(
     total_loss = 0.0
     total_clips = 0
     total_abs_error = 0.0
+    weight_sum = 0.0
+    weight_max = 0.0
     augment_counts: dict[str, int] = {}
     silence_clips = 0
     window_stats = WindowEpochStats()
@@ -1249,6 +1291,16 @@ def _train_one_epoch(
         for names in getattr(batch, "augment_applied", ()):
             for name in names:
                 augment_counts[name] = augment_counts.get(name, 0) + 1
+        weights = None
+        if settings.special_mora_weighting:
+            # 窓ごとの重み（平均1。013）。無効なら重みを掛けず、損失は loss_fn のまま
+            weights = special_mora_weights(
+                _batch_special_ratios(batch),
+                settings.special_mora_weight_alpha,
+                settings.special_mora_weight_max,
+            )
+            weight_sum += float(weights.sum(dtype=np.float32))
+            weight_max = max(weight_max, float(weights.max()))
         if any(batch.kinds):
             window_stats.update(
                 batch.kinds,
@@ -1256,10 +1308,17 @@ def _train_one_epoch(
                 batch.moras.tolist(),
                 batch.durations.tolist(),
                 applied=batch.augment_applied,
+                special_ratios=_batch_special_ratios(batch),
+                weights=None if weights is None else weights.tolist(),
             )
         batch = batch.to(device)
         prediction = model(batch.features, batch.lengths)
-        loss = loss_fn(prediction, batch.moras)
+        if weights is None:
+            loss = loss_fn(prediction, batch.moras)
+        else:
+            loss = weighted_mse_loss(
+                prediction, batch.moras, torch.from_numpy(weights).to(device)
+            )
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if settings.grad_clip > 0:
@@ -1286,8 +1345,15 @@ def _train_one_epoch(
     if total_clips == 0:
         raise RuntimeError("学習データが空である")
     train_seconds = time.perf_counter() - started
+    if settings.special_mora_weighting:
+        loss_weight_mean, loss_weight_max = weight_sum / total_clips, weight_max
+    else:
+        loss_weight_mean, loss_weight_max = 1.0, 1.0
     return {
         "train_loss": total_loss / total_clips,
+        # 損失の窓ごとの重み（013。無音サンプルを含む学習の全件。無効なら1）
+        "train_loss_weight_mean": loss_weight_mean,
+        "train_loss_weight_max": loss_weight_max,
         "train_mae_moras_per_sec": total_abs_error / total_clips,
         "train_seconds": train_seconds,
         # 所要時間の内訳（モジュール docstring「所要時間とデータ読み込み律速の計測」）。
@@ -1581,6 +1647,11 @@ def run_training(
     if config.train.loss not in LOSSES:
         raise ValueError(f"loss は {LOSSES} のいずれか: {config.train.loss}")
     config.train.validate()
+    if config.train.special_mora_weighting and config.train_source != "windows":
+        raise ValueError(
+            "train.special_mora_weight_alpha（特殊拍の多い窓の損失の重み）は data.source=windows"
+            f"（方式B）でだけ使える: {config.train_source}"
+        )
     max_epochs = config.train.resolved_max_epochs
     patience = config.train.early_stopping_patience
     min_delta = float(config.train.early_stopping_min_delta)
@@ -1597,6 +1668,15 @@ def run_training(
         max_epochs,
         config.train.batch_size,
     )
+    if config.train.special_mora_weighting:
+        log.info(
+            "特殊拍の多い窓の損失の重み: 有効 w = min(1 + %g × 特殊拍の割合, %g) ÷ バッチ内の平均"
+            "（docs/decisions/013-special-mora-loss-weight.md。検証の損失には掛けない）",
+            config.train.special_mora_weight_alpha,
+            config.train.special_mora_weight_max,
+        )
+    else:
+        log.info("特殊拍の多い窓の損失の重み: なし")
     if patience is None:
         log.info("早期終了: なし（上限エポック数まで学習する）")
     else:

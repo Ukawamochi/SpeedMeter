@@ -140,6 +140,8 @@ class ClipItem:
         kind: 方式Bの窓の種類（``single`` / ``concat``。spkrate.train.method_b）。
             方式Aのクリップと無音サンプルでは空。
         stretch: 方式Bの窓の伸縮率（伸縮なしは1.0）。
+        special_ratio: 方式Bの窓の特殊拍（ー・ン・ッ）の割合（按分後。正解1.0モーラ未満の窓・無音サンプル・
+            方式Aのクリップでは0。docs/decisions/013-special-mora-loss-weight.md）。
     """
 
     features: np.ndarray
@@ -149,6 +151,7 @@ class ClipItem:
     augment_applied: tuple[str, ...] = ()
     kind: str = ""
     stretch: float = 1.0
+    special_ratio: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -163,6 +166,7 @@ class Batch:
     augment_applied: tuple[tuple[str, ...], ...] = ()  # 件ごとの実際に掛かった拡張
     kinds: tuple[str, ...] = ()  # 件ごとの方式Bの窓の種類（ClipItem.kind）
     stretches: tuple[float, ...] = ()  # 件ごとの方式Bの窓の伸縮率
+    special_ratios: tuple[float, ...] = ()  # 件ごとの方式Bの窓の特殊拍の割合（ClipItem.special_ratio）
 
     def __len__(self) -> int:
         return int(self.features.shape[0])
@@ -177,6 +181,7 @@ class Batch:
             augment_applied=self.augment_applied,
             kinds=self.kinds,
             stretches=self.stretches,
+            special_ratios=self.special_ratios,
         )
 
     def pin_memory(self) -> "Batch":
@@ -224,6 +229,7 @@ def collate_clips(items: Sequence[ClipItem]) -> Batch:
         augment_applied=tuple(tuple(getattr(item, "augment_applied", ())) for item in items),
         kinds=tuple(str(getattr(item, "kind", "")) for item in items),
         stretches=tuple(float(getattr(item, "stretch", 1.0)) for item in items),
+        special_ratios=tuple(float(getattr(item, "special_ratio", 0.0)) for item in items),
     )
 
 
