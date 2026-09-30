@@ -1291,14 +1291,6 @@ def _train_one_epoch(
         for names in getattr(batch, "augment_applied", ()):
             for name in names:
                 augment_counts[name] = augment_counts.get(name, 0) + 1
-        if any(batch.kinds):
-            window_stats.update(
-                batch.kinds,
-                batch.stretches,
-                batch.moras.tolist(),
-                batch.durations.tolist(),
-                applied=batch.augment_applied,
-            )
         weights = None
         if settings.special_mora_weighting:
             # 窓ごとの重み（平均1。013）。無効なら重みを掛けず、損失は loss_fn のまま
@@ -1309,6 +1301,16 @@ def _train_one_epoch(
             )
             weight_sum += float(weights.sum(dtype=np.float32))
             weight_max = max(weight_max, float(weights.max()))
+        if any(batch.kinds):
+            window_stats.update(
+                batch.kinds,
+                batch.stretches,
+                batch.moras.tolist(),
+                batch.durations.tolist(),
+                applied=batch.augment_applied,
+                special_ratios=_batch_special_ratios(batch),
+                weights=None if weights is None else weights.tolist(),
+            )
         batch = batch.to(device)
         prediction = model(batch.features, batch.lengths)
         if weights is None:

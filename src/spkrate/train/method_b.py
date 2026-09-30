@@ -1016,6 +1016,15 @@ class WindowEpochStats:
     # （docs/decisions/012-no-noise-on-strong-stretch.md）。applied を渡した update だけで数える
     noise: int = 0
     noise_skipped: int = 0
+    # 窓の特殊拍の割合（docs/decisions/013-special-mora-loss-weight.md）。special_ratios を渡した
+    # update だけで数える。区間は 0.1 刻み（special_mora.ratio_bin）
+    special_count: int = 0
+    special_sum: float = 0.0
+    special_bins: Counter = field(default_factory=Counter)
+    # 窓の損失の重み（013。無効のときは重みを渡さず、as_dict では1とする）
+    weight_count: int = 0
+    weight_sum: float = 0.0
+    weight_max: float = -math.inf
 
     def update(
         self,
@@ -1024,11 +1033,14 @@ class WindowEpochStats:
         moras: Iterable[float],
         durations: Iterable[float],
         applied: Iterable[Sequence[str]] | None = None,
+        special_ratios: Iterable[float] | None = None,
+        weights: Iterable[float] | None = None,
     ) -> None:
         """種類が空の件（方式Aのクリップ・無音サンプル）は数えない。
 
         ``applied`` は件ごとの ``ClipItem.augment_applied``（``Batch.augment_applied``）。
-        渡したときだけ雑音を重ねた窓・省いた窓を数える。
+        渡したときだけ雑音を重ねた窓・省いた窓を数える。``special_ratios``（``Batch.special_ratios``）
+        と ``weights``（件ごとの損失の重み）も渡したときだけ数える。
         """
         from spkrate.eval.metrics import band_of
 
@@ -1036,12 +1048,27 @@ class WindowEpochStats:
         names_per_item: Iterable[Sequence[str]] = (
             [()] * len(kinds) if applied is None else applied
         )
-        for kind, s, m, d, names in zip(
-            kinds, stretches, moras, durations, names_per_item, strict=True
+        ratio_per_item: Iterable[float | None] = (
+            [None] * len(kinds) if special_ratios is None else special_ratios
+        )
+        weight_per_item: Iterable[float | None] = (
+            [None] * len(kinds) if weights is None else weights
+        )
+        for kind, s, m, d, names, ratio, weight in zip(
+            kinds, stretches, moras, durations, names_per_item, ratio_per_item, weight_per_item,
+            strict=True,
         ):
             if not kind:
                 continue
             self.total += 1
+            if ratio is not None:
+                self.special_count += 1
+                self.special_sum += float(ratio)
+                self.special_bins[ratio_bin(float(ratio))] += 1
+            if weight is not None:
+                self.weight_count += 1
+                self.weight_sum += float(weight)
+                self.weight_max = max(self.weight_max, float(weight))
             if "noise" in names:
                 self.noise += 1
             if NOISE_SKIPPED in names:
@@ -1080,7 +1107,25 @@ class WindowEpochStats:
             "window_noise_rate": self.noise / total if total else float("nan"),
             "window_noise_skipped": self.noise_skipped,
             "window_noise_skipped_rate": self.noise_skipped / total if total else float("nan"),
+            **self._special_dict(),
         }
+
+    def _special_dict(self) -> dict[str, Any]:
+        n = self.special_count
+        out: dict[str, Any] = {
+            "window_special_ratio_mean": self.special_sum / n if n else float("nan"),
+        }
+        for b in range(RATIO_BIN_COUNT):
+            out[f"window_special_ratio_bin{b:02d}"] = (
+                self.special_bins.get(b, 0) / n if n else float("nan")
+            )
+        if self.weight_count:
+            out["window_loss_weight_mean"] = self.weight_sum / self.weight_count
+            out["window_loss_weight_max"] = self.weight_max
+        else:  # 重みを掛けていない（無効）
+            out["window_loss_weight_mean"] = 1.0
+            out["window_loss_weight_max"] = 1.0
+        return out
 
     def describe(self, epoch: int) -> str:
         d = self.as_dict()
@@ -1093,5 +1138,12 @@ class WindowEpochStats:
             f"{d['window_band_6to8']}/{d['window_band_over8']} "
             f"毎秒10/12/14以上={d['window_rate_ge10']}/{d['window_rate_ge12']}/{d['window_rate_ge14']} "
             f"雑音を重ねた窓={d['window_noise']}({d['window_noise_rate']:.4f}) "
-            f"雑音を省いた窓={d['window_noise_skipped']}({d['window_noise_skipped_rate']:.4f})"
+            f"雑音を省いた窓={d['window_noise_skipped']}({d['window_noise_skipped_rate']:.4f}) "
+            f"特殊拍の割合の平均={d['window_special_ratio_mean']:.4f} "
+            "特殊拍の割合の分布(0.1刻み)="
+            + "/".join(
+                f"{d[f'window_special_ratio_bin{b:02d}']:.4f}" for b in range(RATIO_BIN_COUNT)
+            )
+            + f" 損失の重み(平均/最大)={d['window_loss_weight_mean']:.4f}/"
+            f"{d['window_loss_weight_max']:.4f}"
         )
