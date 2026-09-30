@@ -900,6 +900,10 @@ class WindowEpochStats:
     # 毎秒10・12・14モーラ以上の窓の件数（高速度域。docs/directives/2026-09-28-fast-speech.md）
     high: Counter = field(default_factory=Counter)
     total: int = 0
+    # 雑音を実際に重ねた窓（augment_applied に noise）と、規則で省いた窓（noise_skipped）の件数
+    # （docs/decisions/012-no-noise-on-strong-stretch.md）。applied を渡した update だけで数える
+    noise: int = 0
+    noise_skipped: int = 0
 
     def update(
         self,
@@ -907,14 +911,29 @@ class WindowEpochStats:
         stretches: Iterable[float],
         moras: Iterable[float],
         durations: Iterable[float],
+        applied: Iterable[Sequence[str]] | None = None,
     ) -> None:
-        """種類が空の件（方式Aのクリップ・無音サンプル）は数えない。"""
+        """種類が空の件（方式Aのクリップ・無音サンプル）は数えない。
+
+        ``applied`` は件ごとの ``ClipItem.augment_applied``（``Batch.augment_applied``）。
+        渡したときだけ雑音を重ねた窓・省いた窓を数える。
+        """
         from spkrate.eval.metrics import band_of
 
-        for kind, s, m, d in zip(kinds, stretches, moras, durations, strict=True):
+        kinds = list(kinds)
+        names_per_item: Iterable[Sequence[str]] = (
+            [()] * len(kinds) if applied is None else applied
+        )
+        for kind, s, m, d, names in zip(
+            kinds, stretches, moras, durations, names_per_item, strict=True
+        ):
             if not kind:
                 continue
             self.total += 1
+            if "noise" in names:
+                self.noise += 1
+            if NOISE_SKIPPED in names:
+                self.noise_skipped += 1
             self.kinds[kind] += 1
             if s != 1.0:
                 self.stretched += 1
@@ -945,6 +964,10 @@ class WindowEpochStats:
             "window_zero_rate": self.zero / total if total else float("nan"),
             **{f"window_band_{b}": int(self.bands.get(b, 0)) for b in BAND_KEYS},
             **{f"window_rate_ge{int(t)}": int(self.high.get(t, 0)) for t in HIGH_RATE_THRESHOLDS},
+            "window_noise": self.noise,
+            "window_noise_rate": self.noise / total if total else float("nan"),
+            "window_noise_skipped": self.noise_skipped,
+            "window_noise_skipped_rate": self.noise_skipped / total if total else float("nan"),
         }
 
     def describe(self, epoch: int) -> str:
@@ -956,5 +979,7 @@ class WindowEpochStats:
             f"{d['window_stretch_max']:.3f} 正解0の窓={d['window_zero']}({d['window_zero_rate']:.4f}) "
             f"帯別(<4/4-6/6-8/>=8)={d['window_band_under4']}/{d['window_band_4to6']}/"
             f"{d['window_band_6to8']}/{d['window_band_over8']} "
-            f"毎秒10/12/14以上={d['window_rate_ge10']}/{d['window_rate_ge12']}/{d['window_rate_ge14']}"
+            f"毎秒10/12/14以上={d['window_rate_ge10']}/{d['window_rate_ge12']}/{d['window_rate_ge14']} "
+            f"雑音を重ねた窓={d['window_noise']}({d['window_noise_rate']:.4f}) "
+            f"雑音を省いた窓={d['window_noise_skipped']}({d['window_noise_skipped_rate']:.4f})"
         )
