@@ -482,3 +482,8 @@
 - 完走確認 exp000_exp019_smoke_cuda 成功（1エポック）。exp019 は 2026-10-01 03:36 に学習終了（上限30エポック、最良エポック30）、04:20 に評価完了。
 - exp019（exp/024-no-noise-strong-stretch）: 伸縮率 0.7 未満の窓に雑音を重ねない条件。窓単位 dev_window clean MAE 0.4875（exp005 0.4755 比 +0.0120）、クリップ単位 dev MAE 0.4202（exp005 0.4170 比 +0.0032）。雑音下は悪化（窓 clean-noisy_all 0.7225 比 +0.0005）。高速度域 x1.5 MAE 1.0948・x2 MAE 2.3521。
 - ubuntu-desktop で実行中の queue4 が exp019 の結果を Mac に転送、metrics.csv に 37行追記（clip・window・fast_speech）。exp020 の準備はまだ（runs/queue/exp020_ready 未作成、ubuntu-desktop から exp020 の実装コードを送った後に合図を置く予定）。
+
+### 2026-10-01 統括: exp020 の送り出しと学習（人間の指示: exp020 を最後の学習とし、判断の後にテストセットの評価と総括）
+- exp020 のコード（main ce476c7）を sync_to_remote.sh で ubuntu-desktop に送り、runs/queue/exp020_ready を 08:32 に置いた。queue4 が完走確認（重み平均/最大 1.0105/2.0816）の後、08:34 に exp020 の学習を始めた。評価スクリプト run_exp020_eval.sh が遠隔機に無かったため 08:39 に scp で置いた。
+- 以後: exp020 の評価 → Mac に取り戻す → metrics.csv → タスク4（判断、docs/experiments/015）→ 候補と exp005 のテストセット評価（ubuntu-desktop）→ docs/experiments/006-summary.md で停止。
+
