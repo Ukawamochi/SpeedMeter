@@ -135,7 +135,8 @@ class ClipItem:
         duration_sec: クリップ長（秒）。評価で毎秒モーラ数へ直すときに使う。
         clip_id: クリップの識別子。
         augment_applied: 実際に掛かった拡張の名前（``AugmentResult.effective`` と
-            周波数マスクの ``freq_mask``）。拡張なしの経路では空。
+            周波数マスクの ``freq_mask``）。拡張なしの経路では空。方式Bの窓では、雑音重畳を
+            規則で省いた窓に印 ``noise_skipped`` も入る（spkrate.train.method_b.NOISE_SKIPPED）。
         kind: 方式Bの窓の種類（``single`` / ``concat``。spkrate.train.method_b）。
             方式Aのクリップと無音サンプルでは空。
         stretch: 方式Bの窓の伸縮率（伸縮なしは1.0）。
