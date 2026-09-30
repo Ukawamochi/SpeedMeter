@@ -1,0 +1,64 @@
+# exp019（雑音下の過大を抑える学習、指示書 docs/directives/2026-09-30.md タスク2 の exp019）。
+# exp016（configs/exp016.yaml: exp015 から fast_window_redraws 1）から、伸縮率 0.7 未満の窓に雑音を重ねない
+# （augment.params.noise_skip_stretch_below: 0.7）ことだけを変える。雑音を重ねる窓の確率・SNR の範囲、無音サンプルは変えない。
+# 013 5.3節の推測（強く縮めた窓が増え、雑音の時間変化を速さと取り違える）を直接確かめる。spec.md の「データ拡張」の注と
+# docs/decisions/012-no-noise-on-strong-stretch.md。新しい実験の設定でだけ有効にする（人間による仕様の運用の指示）。
+# ubuntu-desktop（cuda、num_workers 8）で学習する。exp016.yaml との差: experiment_id、notes、noise_skip_stretch_below だけ。
+
+experiment_id: exp019
+seed: 20260921       # exp005 と同じ
+device: cuda         # ubuntu-desktop で学習する
+runs_dir: runs
+model_config: configs/model/cnn_base.yaml
+notes: exp016 と同じ設定で、時間伸縮の伸縮率が 0.7 未満の窓には雑音を重ねない（指示書 2026-09-30 タスク2 の exp019）。cuda で学習する
+
+data:
+  source: windows                 # 方式B（spkrate.train.method_b）
+  dev_source: dev_window_val      # 検証は dev_window の抽出50,000窓（事前計算特徴量・拡張なし）
+  dev_window_val_dir: data/processed/dev_window_val
+  train_clip_list: data/processed/train_selection/usable_clip_ids.txt
+  train_alignments: data/processed/alignments/train.jsonl
+  clips_jsonl: data/processed/clips.jsonl
+  train_split: configs/splits/train.json   # test.json は使わない
+  max_train_clips: null  # 学習用の一覧の全件
+  max_dev_clips: null    # 検証窓の50,000窓全件で毎エポック評価する
+  normalization: configs/normalization.yaml
+  normalization_mode: per_mel
+
+windows:
+  window_sec: 2.0
+  margin_sec: 0.5
+  concat_group_size: [3, 5]      # configs/eval/dev_window.yaml と同じ
+  concat_gap_sec: [0.3, 1.5]
+  concat_gap_round_sec: 0.01
+  fast_window_redraws: 1        # exp015 は 3（指示書 2026-09-29 タスク2 の exp016）
+  fast_window_min_rate: 10.0    # 既定値
+
+augment:
+  enabled: true      # AugmentConfig の既定値（exp004 と同じ）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json   # MUSAN noise の学習用だけ
+  params:
+    time_stretch_range: [0.5, 1.5]           # exp005 は既定の 0.7〜1.5。冒頭のコメント
+    time_stretch_distribution: log_uniform   # exp005 は既定の uniform（params なし）
+    noise_skip_stretch_below: 0.7   # 伸縮率 0.7 未満の窓には雑音を重ねない（既定 null＝無効。exp016 は無効）。docs/decisions/012-no-noise-on-strong-stretch.md
+
+silence_samples:
+  enabled: true      # それ以外は exp004 と同じ既定値（割合0.03、3種等分、-90〜-60dBFS、長さは学習入力＝2.0秒）
+  musan_root: data/musan
+  musan_noise_split: configs/splits/musan_noise.json
+
+train:
+  max_epochs: 30                  # 上限（初期状態からエポック1〜30）
+  early_stopping_patience: 5      # 検証の mae_moras_per_sec が5エポック連続で改善しなければ終了
+  batch_size: 64
+  loss: mse
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  num_workers: 8    # exp005 は 4。指示書 0節4（冒頭のコメント。12 は available が 2GiB を切ったのでやり直した）
+  bucketing: false   # 全件201フレームなので長さの整列はしない
+  best_metric: mae_moras_per_sec
+  log_interval: 200
+  # results/metrics.csv への追記は学習後の評価で行う。
+  record_metrics_csv: false
