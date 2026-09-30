@@ -464,3 +464,7 @@
 
 ### 2026-09-30 実装: 指示書 2026-09-30 タスク1（exp016 を web/ に加える）
 - exp016 を CPU で ONNX に書き出し（runs/onnx_exp016、fp32 2,005,372 B、PyTorch との差の最大 5.7e-6 モーラ）、web/models.txt の exp015 を exp016 に置き換えた（feat/web-exp016 f867f5e、未マージ）。node:test 25件・pytest 19件が通過。check.html のブラウザでの確認は人間の作業。
+
+### 2026-09-30 実装: 指示書 2026-09-30 タスク2（exp019 の実装）
+- 伸縮率が閾値未満の窓に雑音を重ねない設定 augment.params.noise_skip_stretch_below（既定 null で無効。乱数は同じだけ消費して結果を捨てる）、窓の集計 window_noise(_rate)・window_noise_skipped(_rate)、spec.md の注、決定記録 012 を加えた（feat/no-noise-strong-stretch 3216c7d、未マージ）。pytest 852件通過（CPU）。
+- 見込み（exp016 のエポック1、20,000窓）: 伸縮率0.7未満は15.8%、雑音を重ねる窓は約50.0%→約42.1%、省く窓は約7.9%。
