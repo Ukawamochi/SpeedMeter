@@ -4,7 +4,9 @@
 音声は読まない（長さはアライメントの duration_sec）。``--check-waveforms N`` を付けると、
 保存後に読み戻した定義から先頭寄りの代表 N 窓（単一・連続の両方）の波形を clean と
 雑音下（設定の最初の SNR）で再生成し、長さと2回の生成のビット一致を確かめる。
-configs/splits/test.json は使わない。data/ 以下の元データは読むだけで変更しない。
+既定の設定（configs/eval/dev_window.yaml）では configs/splits/test.json は使わない。
+``--config configs/eval/test_window.yaml`` は test の分割（第10段階、2026-10-02 の人間の指示）で
+data/processed/test_window/ に作る。data/ 以下の元データは読むだけで変更しない。
 
 実行（リポジトリ直下から）:
     uv run python scripts/build_dev_window.py --check-waveforms 4
@@ -24,7 +26,6 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import numpy as np  # noqa: E402
 
-from spkrate.data.splits import load_split  # noqa: E402
 from spkrate.eval.dev_window import (  # noqa: E402
     KIND_CONCAT,
     KIND_SINGLE,
@@ -38,6 +39,7 @@ from spkrate.eval.dev_window import (  # noqa: E402
     save_dev_window,
 )
 from spkrate.eval.noisy import make_noise_source  # noqa: E402
+from spkrate.eval.split_profile import load_split_ids  # noqa: E402
 
 
 def _resolve(value: str | Path) -> Path:
@@ -91,7 +93,8 @@ def main(argv: list[str] | None = None) -> int:
 
     config = load_window_config(_resolve(args.config))
     clip_to_client, clip_paths = load_dev_clips(
-        _resolve(config.clips_jsonl), load_split(_resolve(config.dev_split))
+        _resolve(config.clips_jsonl),
+        load_split_ids(_resolve(config.dev_split), allow_test=config.allow_test_split),
     )
     alignments = load_alignments(_resolve(config.alignments))
     known = load_known_no_speech(

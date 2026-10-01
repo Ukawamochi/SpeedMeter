@@ -35,8 +35,10 @@
 
 ## テストセットについて
 
-``configs/splits/test.json`` は docs/PLAN.md 第10段階まで使用禁止であり、このスクリプトは
-train と dev のみを扱う。``--splits`` に test を渡すと拒否する。
+``configs/splits/test.json`` は docs/PLAN.md 第10段階（人間の指示 2026-10-02）で使う。
+既定の ``--splits`` は train dev のまま。test は ``--splits test`` と明示した場合だけ処理し、
+``data/processed/features/test/`` に出す。正規化の値は train 由来の configs/normalization.yaml
+の固定値のままで、test から再計算しない（``stats`` は train のみ）。
 """
 
 from __future__ import annotations
@@ -55,7 +57,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from spkrate.data.splits import load_clip_records, load_split  # noqa: E402
+from spkrate.data.splits import load_clip_records  # noqa: E402
+from spkrate.eval.split_profile import load_split_ids  # noqa: E402
 from spkrate.eval.audio import load_audio  # noqa: E402
 from spkrate.features.melspec import MEL_DEFAULTS, LogMelSpectrogram  # noqa: E402
 
@@ -65,6 +68,10 @@ FEATURES_DIR = ROOT / "data" / "processed" / "features"
 NORMALIZATION_YAML = ROOT / "configs" / "normalization.yaml"
 
 ALLOWED_SPLITS = ("train", "dev")
+# 第10段階（2026-10-02 の人間の指示）で test を明示指定の場合に限り扱えるようにした。既定は train・dev のまま。
+# test でも正規化の値は configs/normalization.yaml の固定値（train 由来）を使い、test から再計算しない
+EXPLICIT_SPLITS = ("test",)
+SELECTABLE_SPLITS = ALLOWED_SPLITS + EXPLICIT_SPLITS
 DEFAULT_SHARD_SIZE = 1000
 STORAGE_DTYPE = np.float16
 
@@ -103,11 +110,9 @@ def load_split_tasks(split: str) -> list[ClipTask]:
     """
     if split in _TASK_CACHE:
         return _TASK_CACHE[split]
-    if split not in ALLOWED_SPLITS:
-        raise ValueError(
-            f"扱えない分割: {split}。configs/splits/test.json は第10段階まで使用禁止"
-        )
-    client_ids = set(load_split(SPLITS_DIR / f"{split}.json"))
+    if split not in SELECTABLE_SPLITS:
+        raise ValueError(f"扱えない分割: {split}（train・dev・test のみ）")
+    client_ids = set(load_split_ids(SPLITS_DIR / f"{split}.json", allow_test=split in EXPLICIT_SPLITS))
     tasks: list[ClipTask] = []
     for record in load_clip_records(CLIPS_JSONL):
         if record.client_id in client_ids:
@@ -303,8 +308,8 @@ def command_estimate(args: argparse.Namespace) -> None:
 def command_run(args: argparse.Namespace) -> None:
     splits = list(args.splits)
     for split in splits:
-        if split not in ALLOWED_SPLITS:
-            raise SystemExit(f"扱えない分割: {split}（train と dev のみ）")
+        if split not in SELECTABLE_SPLITS:
+            raise SystemExit(f"扱えない分割: {split}（train・dev・test のみ。test は明示指定）")
 
     jobs: list[tuple[str, int, list[ClipTask]]] = []
     planned: dict[str, int] = {}

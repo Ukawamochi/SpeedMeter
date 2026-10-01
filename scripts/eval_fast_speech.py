@@ -36,7 +36,10 @@ metrics.csv の行（既存の列だけを使う。値は主指標、窓長2.0�
         --window-eval-dir runs/exp005/window_eval --out-dir runs/exp005/fast_speech \\
         --experiment-id 013-fast-speech-exp005 --method-name "..." --append-metrics
 
-configs/splits/test.json は使わない。data/ 以下は読むだけ。
+既定（dev）では configs/splits/test.json は使わない。``--split test``（第10段階、2026-10-02 の人間の指示）は
+対象を test_window・test_fast（configs/eval/test_window.yaml・test_fast.yaml）にし、metrics.csv の split 列を
+``test_window_bin_<区間>``・``test_fast_<条件>``・``test_fast_<条件>_bin_<区間>``（dev を test にした値）にする。
+除外の一覧は data/processed/no_speech/suspect_test.tsv。data/ 以下は読むだけ。
 """
 
 from __future__ import annotations
@@ -56,6 +59,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import numpy as np  # noqa: E402
 import yaml  # noqa: E402
+
+from spkrate.eval.split_profile import SPLITS  # noqa: E402
 
 WINDOW_CONFIG = "configs/eval/dev_window.yaml"
 FAST_CONFIG = "configs/eval/dev_fast.yaml"
@@ -82,7 +87,10 @@ def log(message: str) -> None:
 
 def fast_conditions(args: argparse.Namespace) -> tuple[dict, list[str]]:
     from spkrate.eval.fast_speech import condition_name
+    from spkrate.eval.split_profile import get_profile
 
+    if args.fast_config is None:
+        args.fast_config = get_profile(args.split).fast_config
     with open(_resolve(args.fast_config), encoding="utf-8") as handle:
         cfg = yaml.safe_load(handle)
     names = [condition_name(float(s)) for s in cfg["speeds"]]
@@ -239,12 +247,17 @@ def bins_table(title: str, bins: dict) -> list[str]:
 def cmd_summarize(args: argparse.Namespace) -> int:
     from spkrate.eval.dev_window import load_dev_window, load_known_no_speech, load_window_config
     from spkrate.eval.fast_speech import binned_metrics_rows
+    from spkrate.eval.split_profile import get_profile
     from spkrate.eval.runner import MetricsRow, append_metrics_row, model_size_bytes
 
     if args.append_metrics and not (args.experiment_id and args.method_name and args.model_config):
         raise SystemExit("--append-metrics には --experiment-id・--method-name・--model-config が要る")
-    wcfg = load_window_config(_resolve(WINDOW_CONFIG))
-    flagged_ids = load_known_no_speech(_resolve(wcfg.known_no_speech_list)) | load_suspect_ids(_resolve(SUSPECT_TSV))
+    profile = get_profile(args.split)
+    wcfg = load_window_config(_resolve(profile.window_config))
+    known_ids = load_known_no_speech(
+        None if wcfg.known_no_speech_list is None else _resolve(wcfg.known_no_speech_list)
+    )
+    flagged_ids = known_ids | load_suspect_ids(_resolve(profile.suspect_tsv))
     out_dir = _resolve(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     summary: dict = {"commit": _commit(), "model_key": args.model_key, "checkpoint": args.checkpoint,
@@ -274,9 +287,9 @@ def cmd_summarize(args: argparse.Namespace) -> int:
                f"偏り {_fmt(o['bias'], 4)}。", ""]
         md += bins_table("主指標", entry["main"]["bins"])
         md += bins_table("全窓", entry["unfiltered"]["bins"])
-        config_path = f"{args.model_config};{WINDOW_CONFIG};{NO_SPEECH_CONFIG}"
+        config_path = f"{args.model_config};{profile.window_config};{NO_SPEECH_CONFIG}"
         meta = predict_meta(wdir)
-        for split, metrics in binned_metrics_rows("dev_window", ws.mora[keep], pred[keep], include_overall=False):
+        for split, metrics in binned_metrics_rows(profile.window_split, ws.mora[keep], pred[keep], include_overall=False):
             rows.append((config_path, split, metrics, meta))
 
     if not args.skip_fast:
@@ -300,7 +313,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
             md += bins_table(f"{name} 主指標", entry["main"]["bins"])
             md += bins_table(f"{name} 全窓", entry["unfiltered"]["bins"])
             config_path = f"{args.model_config};{args.fast_config};{NO_SPEECH_CONFIG}"
-            for split, metrics in binned_metrics_rows(f"dev_fast_{name}", ws.mora[keep], pred[keep],
+            for split, metrics in binned_metrics_rows(f"{profile.fast_split_prefix}_{name}", ws.mora[keep], pred[keep],
                                                       include_overall=True):
                 rows.append((config_path, split, metrics, meta))
 
@@ -349,7 +362,9 @@ def main(argv: list[str] | None = None) -> int:
     for q in (p, s):
         q.add_argument("--model-key", required=True, help="予測の配列名（npz のキー。例 exp005）")
         q.add_argument("--out-dir", required=True, help="dev_fast の予測と集計の置き場所（例 runs/exp005/fast_speech）")
-        q.add_argument("--fast-config", default=FAST_CONFIG)
+        q.add_argument("--split", choices=SPLITS, default="dev",
+                       help="対象の分割（既定 dev。test は第10段階、2026-10-02 の人間の指示。configs/eval/test_fast.yaml）")
+        q.add_argument("--fast-config", default=None, help="既定は分割に対応する configs/eval/<split>_fast.yaml")
         q.add_argument("--conditions", default=None, help="x1.5,x2 の一部（既定はすべて）")
     p.set_defaults(func=cmd_predict)
     s.set_defaults(func=cmd_summarize)

@@ -13,7 +13,8 @@
 方式Bへ移る条件の閾値（B1: D1>0.25 mora/s、B2: D2>1.0 モーラ、B5: D3>0.25 mora/s かつ
 D1>0.25）に照らして**超過の有無だけ**を記録する。採否の判断は第7段階7-1の仕事なので書かない。
 
-`configs/splits/test.json` は使わない。`data/` は読むだけで変更しない。
+既定は dev。`--split test` で configs/splits/test.json の話者を対象にする（第10段階、2026-10-02 の
+人間の指示。D1〜D3 の母集団が test の話者になるだけで、手順・乱数・閾値は変えない）。`data/` は読むだけで変更しない。
 
 D2 の雑音は ``--musan-noise-split``（通常 configs/splits/musan_noise.json）の評価用（eval）だけを
 使う。指定が無ければモデルを読み込む前に止まる。2026-09-25 より前の D2 の値は全930ファイルでの値。
@@ -91,6 +92,7 @@ def load_waveforms(records) -> list[tuple[str, np.ndarray]]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default=CHECKPOINT)
+    parser.add_argument("--split", choices=("dev", "test"), default="dev", help="対象の分割。既定は dev")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--d1-clips", type=int, default=D1_CLIPS)
     parser.add_argument("--d2-windows", type=int, default=D2_WINDOWS)
@@ -130,8 +132,10 @@ def main(argv: list[str] | None = None) -> int:
     normalizer = load_normalization(NORMALIZATION)
     predict = make_predictor(model, normalizer, device, batch_size=args.batch_size)
 
+    split_path = f"configs/splits/{args.split}.json"
     rng = np.random.default_rng(args.seed)
     summary: dict[str, object] = {
+        "split": args.split,
         "checkpoint": args.checkpoint,
         "experiment_id": args.experiment_id,
         "best_epoch": int(payload["epoch"]),
@@ -145,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     with MpsFallbackWatcher(logger) as watcher:
         # ------------------------------------------------------------------ D1
         log("D1: dev の4.0秒以上のクリップを列挙する")
-        pool = select_clip_records(CLIPS_JSONL, DEV_SPLIT,
+        pool = select_clip_records(CLIPS_JSONL, split_path,
                                    min_duration_sec=D1_MIN_DURATION_SEC)
         log(f"D1: 母集団 {len(pool)} 件（dev の {D1_MIN_DURATION_SEC} 秒以上）")
         chosen = [pool[i] for i in rng.choice(len(pool), size=min(args.d1_clips, len(pool)),
@@ -261,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # ------------------------------------------------------------------ D3
         log("D3: dev から2件ずつ連結する")
-        dev_all = select_clip_records(CLIPS_JSONL, DEV_SPLIT)
+        dev_all = select_clip_records(CLIPS_JSONL, split_path)
         log(f"D3: 母集団 {len(dev_all)} 件（dev 全件）")
         need = min(args.d3_pairs * 2, len(dev_all) - len(dev_all) % 2)
         picked = [dev_all[i] for i in rng.choice(len(dev_all), size=need, replace=False)]
@@ -331,6 +335,11 @@ def render_markdown(s: dict) -> str:
         lines.append(f"| 3条件まとめ | {a['count']} | **{a['mean']:.4f}** | {a['median']:.4f} | {a['p90']:.4f} | "
                      f"{a['max']:.4f} | {dn['pooled']['signed_error_mora_per_sec_mean']:+.4f} | | |")
         d1_noisy_md = "\n".join(lines) + "\n"
+    split_note = (
+        "test（`configs/splits/test.json`。第10段階の最終評価、2026-10-02 の人間の指示）"
+        if s.get("split") == "test"
+        else "dev のみ。`configs/splits/test.json` は使っていない"
+    )
     events = s["mps_cpu_fallback_events"]
     fallback = (
         "無し"
@@ -344,7 +353,7 @@ def render_markdown(s: dict) -> str:
 - 生成: `uv run python scripts/window_diagnostics.py`（計算の骨格は `src/spkrate/eval/window_diag.py`）
 - モデル: `{s['checkpoint']}`（実験ID `{s['experiment_id']}`、最良エポック {s['best_epoch']}、受容野 {s['receptive_field_frames']} フレーム）
 - デバイス: `{s['device']}`。窓長 {s['window_sec']} 秒、D3の無音 {s['gap_sec']} 秒、乱数の種 {s['seed']}
-- 対象は dev のみ。`configs/splits/test.json` は使っていない
+- 対象の分割: {split_note}
 - **本文書は測定値と閾値超過の有無だけを記録する。結果の解釈・採否の判断は書かない**（第7段階7-1の仕事）
 
 ---

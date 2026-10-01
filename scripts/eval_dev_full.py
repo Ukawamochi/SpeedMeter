@@ -1,5 +1,9 @@
 """学習済みチェックポイントを dev 全件で評価し results/metrics.csv に追記する。
 
+``--split test``（第10段階、2026-10-02 の人間の指示）で test 全件・test の雑音下3条件を同じ手順で評価する
+（特徴量 data/processed/features/test、設定 configs/eval/test_noisy.yaml、metrics.csv の split 列は
+``test``・``test_noisy_snr5/10/15``・``test_noisy_all``。推論時間は Mac だけで測るので空欄）。既定は dev。
+
 ``runs/exp001/eval_dev_full.py``（第5段階5-3、exp001 の評価）と同じ手順を、
 実験ごとに引数で切り替えられるようにしたもの。手順は変えていない。
 
@@ -50,7 +54,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from spkrate.data.splits import load_clip_records, load_split
+from spkrate.data.splits import load_clip_records
 from spkrate.device import dataloader_device_kwargs, setup_device, synchronize
 from spkrate.eval.noisy import (
     DEFAULT_NOISY_CONFIG,
@@ -60,14 +64,13 @@ from spkrate.eval.noisy import (
 )
 from spkrate.eval.runner import (
     DEFAULT_METRICS_CSV,
-    NOISY_POOLED_SPLIT,
     MetricsRow,
     append_metrics_row,
     model_size_bytes,
     noisy_config_path,
-    noisy_split_name,
     pool_metrics,
 )
+from spkrate.eval.split_profile import SPLITS, get_profile, load_split_ids
 from spkrate.features.melspec import log_mel_spectrogram
 from spkrate.train.data import (
     FeatureClipDataset,
@@ -81,8 +84,6 @@ BATCH = 64
 WINDOW_SEC = 2.0
 SAMPLE_RATE = 16000
 LATENCY_SEED = 20260921
-FEATURES_DIR = "data/processed/features/dev"
-DEV_SPLIT = "configs/splits/dev.json"
 CLIPS_JSONL = "data/processed/clips.jsonl"
 AUDIO_ROOT = "."  # clips.jsonl の audio_path はリポジトリ直下からの相対パス
 NORMALIZATION = "configs/normalization.yaml"
@@ -121,6 +122,8 @@ def measure_latency(model, normalizer, device, *, warmup=20, repeats=200):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True, help="checkpoint_best.pt のある runs/ 以下")
+    parser.add_argument("--checkpoint", default=None,
+                        help="評価するチェックポイント（既定は <run-dir>/checkpoint_best.pt）")
     parser.add_argument("--experiment-id", required=True)
     parser.add_argument("--config", required=True, help="metrics.csv に記録する設定ファイルのパス")
     parser.add_argument("--method", default="cnn (話速推定CNN、方式A: クリップ全体入力)")
@@ -130,8 +133,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="results/metrics.csv に追記しない（再現確認用）")
     parser.add_argument("--metrics-csv", default=str(DEFAULT_METRICS_CSV),
                         help="追記先の csv（動作確認ではテスト用の出力先を渡す）")
-    parser.add_argument("--noisy-config", default=str(DEFAULT_NOISY_CONFIG),
-                        help="dev_noisy の設定（configs/eval/dev_noisy.yaml）")
+    parser.add_argument("--split", choices=SPLITS, default="dev",
+                        help="対象の分割（既定 dev）。test は第10段階（2026-10-02 の人間の指示）で、"
+                             "特徴量 data/processed/features/test・configs/eval/test_noisy.yaml を使い、"
+                             "metrics.csv の split 列を test・test_noisy_snr5・... にし、旧方式の推論時間は測らない（空欄）")
+    parser.add_argument("--noisy-config", default=None,
+                        help="雑音下評価の設定（既定は分割に対応する configs/eval/<split>_noisy.yaml）")
     parser.add_argument("--no-noisy", action="store_true",
                         help="dev_noisy を評価しない（clean のみ）")
     parser.add_argument("--limit", type=int, default=None,
@@ -143,6 +150,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="dev_noisy の DataLoader のワーカー数。実測（dev 2,000件、加工と対数メルのみ）で"
                              "0が約316件/秒、2が約137件/秒、4が約80件/秒と、0が最も速かった")
     args = parser.parse_args(argv)
+    profile = get_profile(args.split)
+    if args.noisy_config is None:
+        args.noisy_config = str(DEFAULT_NOISY_CONFIG) if args.split == "dev" else profile.noisy_config
 
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -153,15 +163,16 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device, device_record = setup_device(args.device, logger)
-    checkpoint = str(run_dir / "checkpoint_best.pt")
+    checkpoint = args.checkpoint or str(run_dir / "checkpoint_best.pt")
     model, payload = load_checkpoint(checkpoint, map_location="cpu")
     model = model.to(device).eval()
     print("best epoch:", payload["epoch"], flush=True)
 
     normalizer = load_normalization(NORMALIZATION)
-    dataset = FeatureClipDataset(FEATURES_DIR, client_ids=load_split(DEV_SPLIT),
+    dataset = FeatureClipDataset(profile.features_dir,
+                                 client_ids=load_split_ids(profile.split_json, allow_test=profile.is_test),
                                  normalizer=normalizer, limit=args.limit)
-    print("dev clips:", len(dataset), flush=True)
+    print(f"{args.split} clips:", len(dataset), flush=True)
     sampler = LengthBucketBatchSampler(dataset.frame_counts, BATCH, shuffle=False,
                                        pool_batches=20, seed=0)
     loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate_clips,
@@ -190,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         if noisy_config is not None:
             pooled_parts = []
             for snr_db in noisy_config.snr_db:
-                split = noisy_split_name(snr_db)
+                split = profile.noisy_split(snr_db)
                 noisy_dataset = NoisyClipDataset(noisy_records, AUDIO_ROOT, snr_db,
                                                  config=noisy_config, noise_source=noise_source,
                                                  normalizer=normalizer)
@@ -211,11 +222,14 @@ def main(argv: list[str] | None = None) -> int:
                     [p[r.clip_id] * float(r.duration_sec) for r in noisy_records],
                     [float(r.duration_sec) for r in noisy_records],
                 ))
-            noisy_metrics[NOISY_POOLED_SPLIT] = pool_metrics(pooled_parts)
-            print(f"metrics {NOISY_POOLED_SPLIT}:",
-                  json.dumps(noisy_metrics[NOISY_POOLED_SPLIT].as_dict(), ensure_ascii=False),
+            noisy_metrics[profile.noisy_pooled_split] = pool_metrics(pooled_parts)
+            print(f"metrics {profile.noisy_pooled_split}:",
+                  json.dumps(noisy_metrics[profile.noisy_pooled_split].as_dict(), ensure_ascii=False),
                   flush=True)
-        latency = measure_latency(model, normalizer, device)
+        # 推論時間の測定は Mac だけで行う（CLAUDE.md）。test は旧方式の値も測らず、列は空欄にする
+        latency = (measure_latency(model, normalizer, device) if not profile.is_test
+                   else {"frames": None, "forward_only_ms": None, "total_ms": float("nan"),
+                         "warmup": None, "repeats": None})
     print("latency:", json.dumps(latency), flush=True)
     print("mps_cpu_fallback_events:", len(watcher.events), flush=True)
     size = model_size_bytes(checkpoint)
@@ -225,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
             experiment_id=args.experiment_id,
             method=args.method,
             config_path=args.config,
-            split="dev",
+            split=profile.clean_split,
             metrics=metrics,
             latency_ms_per_inference=latency["total_ms"],
             model_size_bytes=size,
@@ -247,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = {"experiment_id": args.experiment_id, "best_epoch": int(payload["epoch"]),
                "metrics": metrics.as_dict(), "extras": extras, "latency": latency,
                "model_size_bytes": size, "checkpoint": checkpoint,
-               "limit": args.limit,
+               "limit": args.limit, "split": args.split,
                "host": device_record,
                "noisy_config": None if args.no_noisy else args.noisy_config,
                "noisy_metrics": {k: v.as_dict() for k, v in noisy_metrics.items()},

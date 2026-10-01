@@ -9,7 +9,8 @@ data/processed/clips.jsonl（文）、data/processed/dev_window/（窓の定義�
 - ``apply``: configs/eval/no_speech.yaml の規則を適用し、results/no_speech_suspect_dev.tsv と
   件数の要約（話速帯別・dev_window の窓数）を JSON で書く
 
-configs/splits/test.json は使わない。
+既定は dev。``apply --split test`` は test の指標（detect_no_speech.py --split test の出力）に同じ固定の規則を
+適用し、data/processed/no_speech/suspect_test.tsv を書く（第10段階、2026-10-02 の人間の指示。規則は変えない）。
 
 使い方:
     uv run python scripts/analyze_no_speech.py candidates --out <scratch>/candidates.md
@@ -214,17 +215,32 @@ def cmd_apply(rows: list[dict], known: set[str], args: argparse.Namespace) -> No
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=("candidates", "apply"))
-    ap.add_argument("--metrics", default="data/processed/no_speech/dev_metrics.jsonl")
-    ap.add_argument("--known", default="results/error_cases/to_listen.tsv")
+    ap.add_argument("--split", choices=("dev", "test"), default="dev",
+                    help="対象の分割。test（第10段階、2026-10-02 の人間の指示）は apply だけ。"
+                         "既定の入出力が test 用（test_metrics.jsonl・test_window・suspect_test.tsv）になり、known_no_speech は無し")
+    ap.add_argument("--metrics", default=None)
+    ap.add_argument("--known", default=None)
     ap.add_argument("--rule", default="configs/eval/no_speech.yaml")
-    ap.add_argument("--dev-window", default="data/processed/dev_window")
-    ap.add_argument("--tsv", default="results/no_speech_suspect_dev.tsv")
+    ap.add_argument("--dev-window", default=None)
+    ap.add_argument("--tsv", default=None)
     ap.add_argument("--out", default="candidates.md", help="candidates の出力")
-    ap.add_argument("--summary", default="data/processed/no_speech/apply_summary.json")
+    ap.add_argument("--summary", default=None)
     args = ap.parse_args()
 
+    is_test = args.split == "test"
+    if is_test and args.command != "apply":
+        raise SystemExit("--split test は apply だけ（規則は dev で決めた固定のもの）")
+    args.metrics = args.metrics or (
+        "data/processed/no_speech/test_metrics.jsonl" if is_test else "data/processed/no_speech/dev_metrics.jsonl")
+    args.dev_window = args.dev_window or ("data/processed/test_window" if is_test else "data/processed/dev_window")
+    args.tsv = args.tsv or (
+        "data/processed/no_speech/suspect_test.tsv" if is_test else "results/no_speech_suspect_dev.tsv")
+    args.summary = args.summary or (
+        "data/processed/no_speech/apply_summary_test.json" if is_test else "data/processed/no_speech/apply_summary.json")
+    # test には人間が聴いた known_no_speech（dev の37件）は無い
+    known_path = args.known or (None if is_test else "results/error_cases/to_listen.tsv")
     rows = load_metrics(Path(args.metrics))
-    known = load_known_no_speech(args.known)
+    known = load_known_no_speech(known_path)
     missing = known - {r["clip_id"] for r in rows}
     if missing:
         raise SystemExit(f"37件のうち指標の無いクリップがある: {sorted(missing)}")
