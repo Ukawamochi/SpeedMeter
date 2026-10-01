@@ -487,3 +487,8 @@
 - exp020 のコード（main ce476c7）を sync_to_remote.sh で ubuntu-desktop に送り、runs/queue/exp020_ready を 08:32 に置いた。queue4 が完走確認（重み平均/最大 1.0105/2.0816）の後、08:34 に exp020 の学習を始めた。評価スクリプト run_exp020_eval.sh が遠隔機に無かったため 08:39 に scp で置いた。
 - 以後: exp020 の評価 → Mac に取り戻す → metrics.csv → タスク4（判断、docs/experiments/015）→ 候補と exp005 のテストセット評価（ubuntu-desktop）→ docs/experiments/006-summary.md で停止。
 
+### 2026-10-02 統括: exp020 の完了、判断（015）、第10段階の開始
+- exp020 は 10/1 14:07 に学習を終え（最良エポック28、検証 MAE 0.5023）、15:00 に評価を終えた。Mac に戻し metrics.csv に40行追記した。特殊拍の8以上の傾きは exp020 −0.214（exp016 −0.211、exp005 −0.188）で「改善」でなく、exp019（−0.207）も基準を満たさない。
+- docs/experiments/015: 基準をすべて満たす条件は無く、最終モデルの候補は exp016（x2 の天井が最良、超過の割合の和が最小）。基準構成は exp005 のまま、web/ に加えるものは無い。
+- 第10段階: test 用の準備と評価を --split test で動かす仕組みを作り（exp/026-test-eval）、ubuntu-desktop で exp016 → exp005 のテスト評価を 08:40 に始めた（準備は約3〜3.5時間の見込み）。
+
