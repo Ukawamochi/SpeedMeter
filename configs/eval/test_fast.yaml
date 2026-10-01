@@ -1,0 +1,17 @@
+# 速めた音声の評価セット test_fast の定義（第10段階、2026-10-02 の人間の指示）。
+# configs/eval/dev_fast.yaml と同じ作り方（x1.5・x2、WSOLA、音源の選び方、num_sources、乱数の種）で、
+# 音源を test_window（configs/eval/test_window.yaml）にしたもの。実装は dev_fast と同じ
+# （src/spkrate/eval/fast_speech.py、scripts/build_dev_fast.py --config この設定）。出力は data/processed/test_fast/
+# 評価1・2の集計は scripts/eval_fast_speech.py --split test。
+seed: 202609281
+num_sources: 2000
+speeds: [1.5, 2.0]
+dev_window_config: configs/eval/test_window.yaml
+output_dir: data/processed/test_fast
+method: wsola
+wsola:
+  library: audiotsm
+  frame_length: 1024   # 64ms
+  synthesis_hop: 512   # 分析の刻みは 512 × speed（1.5倍速 768、2倍速 1024。整数でない速さは使えない）
+  tolerance: 512       # 分析の窓を動かせる最大の標本数（audiotsm の既定 frame_length // 2 と同じ）
+  pad_samples: 4096    # audiotsm が末尾を出力しない分を補うため入力の末尾に足す0の標本数
