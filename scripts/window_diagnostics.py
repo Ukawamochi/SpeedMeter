@@ -149,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     with MpsFallbackWatcher(logger) as watcher:
         # ------------------------------------------------------------------ D1
         log("D1: dev の4.0秒以上のクリップを列挙する")
-        pool = select_clip_records(CLIPS_JSONL, split_path,
+        pool = select_clip_records(CLIPS_JSONL, split_path, allow_test=args.split == "test",
                                    min_duration_sec=D1_MIN_DURATION_SEC)
         log(f"D1: 母集団 {len(pool)} 件（dev の {D1_MIN_DURATION_SEC} 秒以上）")
         chosen = [pool[i] for i in rng.choice(len(pool), size=min(args.d1_clips, len(pool)),
@@ -265,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # ------------------------------------------------------------------ D3
         log("D3: dev から2件ずつ連結する")
-        dev_all = select_clip_records(CLIPS_JSONL, split_path)
+        dev_all = select_clip_records(CLIPS_JSONL, split_path, allow_test=args.split == "test")
         log(f"D3: 母集団 {len(dev_all)} 件（dev 全件）")
         need = min(args.d3_pairs * 2, len(dev_all) - len(dev_all) % 2)
         picked = [dev_all[i] for i in rng.choice(len(dev_all), size=need, replace=False)]

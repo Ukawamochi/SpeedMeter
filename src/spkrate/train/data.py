@@ -362,15 +362,21 @@ def select_clip_records(
     min_duration_sec: float = 0.0,
     max_duration_sec: float | None = None,
     clip_ids: Collection[str] | None = None,
+    allow_test: bool = False,
 ) -> list[ClipRecord]:
     """clips.jsonl から、指定した分割に属するクリップを取り出す。
+
+    ``allow_test=True`` のときだけ test の分割を受け付ける（第10段階、2026-10-02 の人間の指示。
+    ``--split test`` を明示された評価の入口だけが渡す）。
 
     ``split_path`` に ``configs/splits/test.json`` を渡すと
     ``spkrate.data.splits.load_split`` が拒否する（docs/PLAN.md 禁止事項）。
     ``clip_ids`` を与えると、その clip_id のクリップだけを使う（``data.train_clip_list``）。
     ``limit`` はこの絞り込みの後の件数に掛かる。``None`` なら従来どおり絞らない。
     """
-    client_ids = set(load_split(split_path))
+    from spkrate.eval.split_profile import load_split_ids
+
+    client_ids = set(load_split_ids(split_path, allow_test=allow_test))
     allowed_clips = set(clip_ids) if clip_ids is not None else None
     records: list[ClipRecord] = []
     for record in load_clip_records(clips_jsonl):

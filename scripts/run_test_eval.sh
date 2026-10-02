@@ -18,7 +18,9 @@
 #   （既存の clip_id・シャードを飛ばす）。test_window・test_fast は出力先が空でないと作り直しを拒むので、
 #   途中で止まったときは人間が出力先を確かめてから消す（このスクリプトは data/ を消さない）。
 # 状態: <出力>/status.txt に段ごとに記録する。どれかの段が失敗したらその場で 0 以外で終わる。
-#   status.txt が既にあれば上書きせず終わる（再実行は別の実験ID か、status.txt を人間が退避してから）。
+#   評価の段（window_predict〜fast_summarize）は成功すると <出力>/<段>.ok を作る。再実行（status.txt があっても
+#   続きから扱う。START 行は追記）では <段>.ok がある段を飛ばす。手で <段>.ok を作れば、その段まで済んだものとして進む。
+#   metrics_work.csv は既にあれば作り直さず追記を続ける。
 # git を操作しない。MPS は使わない（cuda 固定）。
 set -uo pipefail
 unset VIRTUAL_ENV
@@ -37,21 +39,26 @@ M=${4:-"cnn ($ID) テストセット評価（第10段階）"}
 OUT=runs/test_eval/$ID
 PREP=data/processed/test_prep
 mkdir -p "$OUT" "$PREP"
-if [ -e "$OUT/status.txt" ]; then echo "$OUT/status.txt が既にある。上書きしない" >&2; exit 3; fi
 if [ ! -f "$CK" ]; then echo "チェックポイントが無い: $CK" >&2; exit 4; fi
 if [ ! -f "$CFG" ]; then echo "設定が無い: $CFG" >&2; exit 4; fi
 if [ ! -f configs/splits/test.json ]; then echo "configs/splits/test.json が無い" >&2; exit 4; fi
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-echo "START $(date -Iseconds) commit=$COMMIT host=$(hostname -s) device=$DEVICE id=$ID checkpoint=$CK config=$CFG" > "$OUT/status.txt"
+# status.txt が既にあれば「続きから」として追記する（成功済みの評価の段は <段>.ok があれば飛ばす）
+echo "START $(date -Iseconds) commit=$COMMIT host=$(hostname -s) device=$DEVICE id=$ID checkpoint=$CK config=$CFG" >> "$OUT/status.txt"
 
 # 1段を実行して status.txt に記録する。失敗したらそこで終わる。
 step() {
   local name=$1 log=$2; shift 2
+  if [ -e "$OUT/$name.ok" ]; then
+    echo "SKIP $name（$OUT/$name.ok がある）" >> "$OUT/status.txt"
+    return 0
+  fi
   local S=$(date +%s)
   "$@" > "$OUT/$log" 2>&1
   local rc=$?
   echo "$name rc=$rc sec=$(( $(date +%s) - S )) $(date -Iseconds)" >> "$OUT/status.txt"
   if [ $rc -ne 0 ]; then echo "FAIL $name rc=$rc" >> "$OUT/status.txt"; exit $rc; fi
+  date -Iseconds > "$OUT/$name.ok"
 }
 # 準備の段。印があれば飛ばす。成功したら印を付ける。
 prep() {
@@ -80,7 +87,7 @@ prep prep_no_speech_apply prep_no_speech_apply.log $UV run --frozen python scrip
 
 # ------------------------------------------------------------------ 評価（5）
 WORK=$OUT/metrics_work.csv
-cp results/metrics.csv "$WORK"
+[ -e "$WORK" ] || cp results/metrics.csv "$WORK"
 step window_predict window_predict.log $UV run --frozen python scripts/eval_dev_window.py predict --split test \
   --out-dir "$OUT/window_eval" --model-key "$ID" --checkpoint "$CK" --no-envelope --device $DEVICE
 step window_summarize window_summarize.log $UV run --frozen python scripts/eval_dev_window.py summarize --split test \

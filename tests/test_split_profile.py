@@ -256,3 +256,19 @@ def test_run_test_eval_script_uses_test_split_and_cuda():
                    "--metrics-csv", "DEVICE=cuda", "configs/eval/test_noisy.yaml"):
         assert needle in text
     assert "--device mps" not in text and "DEVICE=mps" not in text
+
+
+def test_select_clip_records_test_only_with_permission(tmp_path):
+    from spkrate.train.data import select_clip_records
+
+    splits, clips = _write_synthetic(tmp_path)
+    with pytest.raises(ValueError):
+        select_clip_records(clips, splits / "test.json")
+    rows = select_clip_records(clips, splits / "test.json", allow_test=True, min_duration_sec=0.5)
+    assert {r.client_id for r in rows} == {"d", "e"}
+    assert {r.client_id for r in select_clip_records(clips, splits / "dev.json")} == {"c"}
+
+
+def test_window_diagnostics_passes_allow_test_for_test_split():
+    text = (ROOT / "scripts" / "window_diagnostics.py").read_text(encoding="utf-8")
+    assert text.count('allow_test=args.split == "test"') == 2
