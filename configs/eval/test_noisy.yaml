@@ -1,0 +1,23 @@
+# 雑音下評価セット test_noisy の定義（第10段階、2026-10-02 の人間の指示）。
+# configs/eval/dev_noisy.yaml と同じ値（乱数の種・SNR・残響・MUSAN noise の評価用分割）で、対象を
+# configs/splits/test.json の全件にしたもの（scripts/eval_dev_full.py --split test が使う）。
+# 雑音の選び方は clip_id から決まる（dev_noisy の説明を参照）ので、値を変えない。
+# 一致は tests/test_split_profile.py で確認する。MUSAN noise は評価用（eval）だけを使う。
+seed: 20260924
+snr_db: [5, 10, 15]
+# 相対パスはリポジトリ直下から解決する
+musan_root: data/musan
+musan_subsets: [noise]
+# MUSAN noise の学習用・評価用の分割（2026-09-25）。dev_noisy は評価用（eval）だけを使う。
+# 指定が無いと評価の開始前に止まる。exp004 までの dev_noisy の値は分割前の全930ファイルでの値
+musan_noise_split: configs/splits/musan_noise.json
+reverb:
+  room_dim_m: [6.0, 4.5, 2.7]
+  # Sabine の式の逆算で壁の吸音率を決めるときの目標残響時間（秒）
+  rt60_sec: 0.5
+  source_pos_m: [2.0, 2.2, 1.5]
+  mic_pos_m: [3.5, 2.6, 1.2]
+  # 鏡像法の最大反射次数。Sabine の逆算が返す次数（74）では生成した応答の実測 RT60 が
+  # 0.71秒と目標より長く、12（学習時の拡張の既定）では0.22秒と短い。30で実測0.51秒
+  # （pyroomacoustics.experimental.measure_rt60、pyroomacoustics 0.10.1）となり目標に合う
+  max_order: 30

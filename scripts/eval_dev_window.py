@@ -14,6 +14,12 @@
 - ``summarize``: 保存した予測から指標を計算し ``runs/window_eval/summary.json`` と
   ``runs/window_eval/tables.md`` に書く。``--append-metrics`` で results/metrics.csv に追記する
 
+``--split test``（第10段階、2026-10-02 の人間の指示）: 対象を test_window（``configs/eval/test_window.yaml``、
+``data/processed/test_window/``）にし、既定の出力先を ``runs/test_window_eval/``、除外の一覧を
+``data/processed/no_speech/suspect_test.tsv``（test には known_no_speech は無い）、metrics.csv の split 列を
+``test_window``・``test_window_noisy_snr5`` など（先頭の dev を test にした値）にする。既定の dev の動作は変わらない。
+``--metrics-csv`` で追記先を作業用の写しに向けられる（summarize）。
+
 推論の経路（exp004）: 窓の波形 → 対数メル（``LogMelSpectrogram``、学習の waveform 経路と同じ）
 → ``configs/normalization.yaml``（per_mel、学習時と同じ）→ ``runs/exp004/checkpoint_best.pt``
 （008 と同じ）を mps で前向き計算（``spkrate.eval.window_diag.make_predictor``）。
@@ -74,6 +80,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import numpy as np  # noqa: E402
 
+from spkrate.eval.split_profile import SPLITS  # noqa: E402
+
 CONFIG = "configs/eval/dev_window.yaml"
 NO_SPEECH_CONFIG = "configs/eval/no_speech.yaml"
 SUSPECT_TSV = "results/no_speech_suspect_dev.tsv"
@@ -127,9 +135,9 @@ def cmd_predict(args: argparse.Namespace) -> int:
     import torch
 
     from spkrate.baselines.envelope import EnvelopeSpeedEstimator, load_params
-    from spkrate.data.splits import load_split
     from spkrate.eval.dev_window import DevWindowAudio, load_dev_clips, load_dev_window, load_window_config
     from spkrate.eval.noisy import make_noise_source
+    from spkrate.eval.split_profile import get_profile, load_split_ids
     from spkrate.eval.window_diag import make_predictor
     from spkrate.eval.window_eval import source_window_ranges
     from spkrate.train.data import load_normalization
@@ -139,10 +147,13 @@ def cmd_predict(args: argparse.Namespace) -> int:
                         format="%(asctime)s %(levelname)s %(message)s")
     logger = logging.getLogger("eval_dev_window")
 
-    config = load_window_config(_resolve(CONFIG))
+    profile = get_profile(args.split)
+    config = load_window_config(_resolve(profile.window_config))
     ws = load_dev_window(_resolve(config.output_dir))
     ranges = source_window_ranges(ws)
-    _, clip_paths = load_dev_clips(_resolve(config.clips_jsonl), load_split(_resolve(config.dev_split)))
+    _, clip_paths = load_dev_clips(
+        _resolve(config.clips_jsonl), load_split_ids(_resolve(config.dev_split), allow_test=config.allow_test_split)
+    )
     paths = {k: _resolve(Path(config.audio_root) / v) for k, v in clip_paths.items()}
     noise_source = make_noise_source(config.noisy, repo_root=ROOT)
     audio = DevWindowAudio(config, paths, noise_source=noise_source)
@@ -319,6 +330,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     from spkrate.eval.dev_window import load_alignments, load_dev_window, load_known_no_speech, load_window_config
     from spkrate.eval.metrics import BAND_KEYS, compute_metrics
     from spkrate.eval.no_speech import windows_from_clips
+    from spkrate.eval.split_profile import get_profile
     from spkrate.eval.runner import MetricsRow, append_metrics_row, model_size_bytes
     from spkrate.eval.window_eval import (
         rate_summary,
@@ -327,7 +339,8 @@ def cmd_summarize(args: argparse.Namespace) -> int:
         zero_window_summary,
     )
 
-    config = load_window_config(_resolve(CONFIG))
+    profile = get_profile(args.split)
+    config = load_window_config(_resolve(profile.window_config))
     ws = load_dev_window(_resolve(config.output_dir))
     out_dir = _resolve(args.out_dir)
     conditions = condition_names(config) if args.conditions is None else args.conditions.split(",")
@@ -346,8 +359,10 @@ def cmd_summarize(args: argparse.Namespace) -> int:
         with np.load(out_dir / f"pred_{name}.npz") as data:
             preds[name] = {m: data[m].astype(np.float32) for m in methods}
 
-    known_ids = load_known_no_speech(_resolve(config.known_no_speech_list))
-    suspect_ids = load_suspect_ids(_resolve(SUSPECT_TSV))
+    known_ids = load_known_no_speech(
+        None if config.known_no_speech_list is None else _resolve(config.known_no_speech_list)
+    )
+    suspect_ids = load_suspect_ids(_resolve(profile.suspect_tsv))
     flagged = windows_from_clips(ws, known_ids | suspect_ids)
     if not np.array_equal(ws.known_no_speech, ws.known_no_speech & flagged):
         raise ValueError("known_no_speech の窓が除外に含まれていない")
@@ -446,7 +461,8 @@ def cmd_summarize(args: argparse.Namespace) -> int:
         predict_host = (meta.get("host") or {}).get("host_label")
         predict_device = str(meta["device"]).split(":")[0] if meta.get("device") else None
         durations = [W_SEC] * int(keep.sum())
-        split_names = {"clean": "dev_window", **{n: f"dev_window_noisy_{n}" for n in conditions[1:]}}
+        split_names = {"clean": profile.window_split,
+                       **{n: profile.window_noisy_split(n) for n in conditions[1:]}}
         for method in methods:
             rows = []
             parts_t, parts_p = [], []
@@ -460,8 +476,8 @@ def cmd_summarize(args: argparse.Namespace) -> int:
             if with_noisy_all:
                 pooled = compute_metrics(np.concatenate(parts_t).tolist(), np.concatenate(parts_p).tolist(),
                                          [W_SEC] * int(keep.sum()) * len(parts_t))
-                rows.append(("dev_window_noisy_all", pooled))
-            config_path = f"{method_configs[method]};{CONFIG};{NO_SPEECH_CONFIG}"
+                rows.append((profile.window_noisy_pooled_split, pooled))
+            config_path = f"{method_configs[method]};{profile.window_config};{NO_SPEECH_CONFIG}"
             is_model = method == args.model_key
             for split, metrics in rows:
                 append_metrics_row(MetricsRow(
@@ -471,7 +487,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
                     model_size_bytes=size if is_model else None,
                     host=predict_host,
                     device=predict_device if is_model else "cpu",
-                ), csv_path=_resolve("results/metrics.csv"))
+                ), csv_path=_resolve(args.metrics_csv))
                 log(f"metrics.csv: {experiment_ids[method]} {split} mae={metrics.mae_moras_per_sec:.4f}")
     log("SUMMARIZE_DONE")
     return 0
@@ -481,7 +497,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("predict")
-    p.add_argument("--out-dir", default=OUT_DIR)
+    p.add_argument("--out-dir", default=None, help="既定は runs/window_eval（--split test は runs/test_window_eval）")
     p.add_argument("--conditions", default=None, help="clean,snr5,snr10,snr15 の一部（既定はすべて）")
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--chunk-sources", type=int, default=500)
@@ -494,8 +510,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--onnx-threads", type=int, default=None,
                    help="ONNX Runtime の intra_op_num_threads（省略時は ONNX Runtime の既定）")
     s = sub.add_parser("summarize")
-    s.add_argument("--out-dir", default=OUT_DIR)
+    s.add_argument("--out-dir", default=None, help="既定は runs/window_eval（--split test は runs/test_window_eval）")
     s.add_argument("--append-metrics", action="store_true")
+    s.add_argument("--metrics-csv", default="results/metrics.csv",
+                   help="追記先の csv（既定は results/metrics.csv。作業用の写しに向けられる）")
     s.add_argument("--model-config", default=MODEL_CONFIG, help="metrics.csv の config_path に書くモデルの設定")
     s.add_argument("--experiment-id", default=None, help="metrics.csv の実験ID（既定は exp004 の値）")
     s.add_argument("--method-name", default=None, help="metrics.csv の method（既定は exp004 の値）")
@@ -504,12 +522,16 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--model-file", default=None,
                    help="metrics.csv の model_size_bytes に大きさを書くファイル（既定は --checkpoint）")
     for q in (p, s):
+        q.add_argument("--split", choices=SPLITS, default="dev",
+                       help="対象の分割（既定 dev。test は第10段階、2026-10-02 の人間の指示。configs/eval/test_window.yaml）")
         q.add_argument("--model-key", default="exp004", help="予測の配列名（npz のキー）")
         q.add_argument("--checkpoint", default=CHECKPOINT)
         q.add_argument("--no-envelope", action="store_true", help="包絡ベースラインを省く")
     p.set_defaults(func=cmd_predict)
     s.set_defaults(func=cmd_summarize)
     args = parser.parse_args(argv)
+    if args.out_dir is None:
+        args.out_dir = OUT_DIR if args.split == "dev" else "runs/test_window_eval"
     return args.func(args)
 
 

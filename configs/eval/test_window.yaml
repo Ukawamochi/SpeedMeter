@@ -1,0 +1,42 @@
+# 窓単位の評価セット test_window の定義（第10段階、2026-10-02 の人間の指示）。
+# dev_window（configs/eval/dev_window.yaml）と同じ窓の選び方・乱数規則・雑音の掛け方で、対象の分割だけを
+# configs/splits/test.json（話者単位で固定済み。29,518クリップ・1,711話者、dev と同規模）にしたもの。
+# 実装は dev_window と同じ（src/spkrate/eval/dev_window.py、scripts/build_dev_window.py --config この設定）。
+# 出力は data/processed/test_window/（Git管理外）。違いは次の5点だけ
+# - dev_split: configs/splits/test.json（allow_test_split: true で test の分割を許す）
+# - alignments: data/processed/alignments/test.jsonl（scripts/align_dev.py --split test）
+# - known_no_speech_list: なし（人間が聴いた37件は dev のクリップ。test には印を付けない）
+# - output_dir: data/processed/test_window
+# - 乱数の種などの値は dev_window と同じ（話者ごとの乱数の鍵が client_id なので dev とは別の組になる）
+# 無発話疑い no_speech_suspect は test にも configs/eval/no_speech.yaml の固定の規則を適用する
+# （scripts/detect_no_speech.py --split test → scripts/analyze_no_speech.py apply --split test）。
+seed: 20260927
+window_sec: 2.0
+hop_sec: 0.25
+sample_rate: 16000
+concat:
+  group_size: [3, 5]   # 両端を含む整数の一様乱数
+  gap_sec: [0.3, 1.5]  # 両端を含む一様乱数を gap_round_sec に丸める
+  gap_round_sec: 0.01
+isolation_threshold_sec: 1.0
+# 相対パスはリポジトリ直下から解決する
+dev_split: configs/splits/test.json
+allow_test_split: true
+clips_jsonl: data/processed/clips.jsonl
+alignments: data/processed/alignments/test.jsonl
+audio_root: .
+known_no_speech_list: null
+output_dir: data/processed/test_window
+# 雑音下の版。値は configs/eval/dev_noisy.yaml・test_noisy.yaml と同じ（tests/test_split_profile.py で一致を確認する）
+noisy:
+  seed: 20260924
+  snr_db: [5, 10, 15]
+  musan_root: data/musan
+  musan_subsets: [noise]
+  musan_noise_split: configs/splits/musan_noise.json
+  reverb:
+    room_dim_m: [6.0, 4.5, 2.7]
+    rt60_sec: 0.5
+    source_pos_m: [2.0, 2.2, 1.5]
+    mic_pos_m: [3.5, 2.6, 1.2]
+    max_order: 30

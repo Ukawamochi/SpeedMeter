@@ -307,11 +307,16 @@ def select_dev_clips(
     *,
     num: int | None = None,
     seed: int | None = None,
+    allow_test: bool = False,
 ) -> list[dict]:
-    """dev の話者に属するクリップを返す。num を指定すると seed で無作為に num 件選ぶ。"""
-    from spkrate.data.splits import load_split
+    """dev の話者に属するクリップを返す。num を指定すると seed で無作為に num 件選ぶ。
 
-    dev_speakers = set(load_split(dev_split_path))
+    ``allow_test=True`` のときだけ test の分割ファイルを受け付ける（第10段階、2026-10-02 の人間の指示。
+    ``--split test`` を明示された入口だけが渡す）。既定は従来どおり test を拒否する。
+    """
+    from spkrate.eval.split_profile import load_split_ids
+
+    dev_speakers = set(load_split_ids(dev_split_path, allow_test=allow_test))
     records: list[dict] = []
     with Path(clips_path).open(encoding="utf-8") as f:
         for line in f:

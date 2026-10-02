@@ -126,6 +126,9 @@ class DevWindowConfig:
     audio_root: str = "."
     known_no_speech_list: str | None = "results/error_cases/to_listen.tsv"
     output_dir: str = "data/processed/dev_window"
+    # 第10段階（2026-10-02 の人間の指示）。configs/eval/test_window.yaml だけが true にする。
+    # 既定の false では従来どおり test の分割を拒否する
+    allow_test_split: bool = False
 
     def __post_init__(self) -> None:
         if self.window_samples <= 0 or self.hop_samples <= 0:
@@ -134,7 +137,7 @@ class DevWindowConfig:
             raise ValueError(f"窓長が標本の整数倍でない: {self.window_sec}")
         if abs(self.hop_samples / self.sample_rate - self.hop_sec) > 1e-9:
             raise ValueError(f"刻みが標本の整数倍でない: {self.hop_sec}")
-        if "test" in Path(self.dev_split).stem:
+        if "test" in Path(self.dev_split).stem and not self.allow_test_split:
             raise ValueError(f"dev_window に test の分割は使わない: {self.dev_split}")
 
     @property
@@ -166,6 +169,7 @@ class DevWindowConfig:
             audio_root=str(mapping.get("audio_root", ".")),
             known_no_speech_list=mapping.get("known_no_speech_list"),
             output_dir=str(mapping.get("output_dir", "data/processed/dev_window")),
+            allow_test_split=bool(mapping.get("allow_test_split", False)),
         )
 
 

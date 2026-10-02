@@ -14,7 +14,9 @@
 （ubuntu-desktop）に ``scripts/sync_to_remote.sh --data`` で送った後の確認や、遠隔機で同じ手順で
 作れることの確認に使う。
 
-configs/splits/test.json は使わない。data/ 以下の既存のファイルは読むだけで変更しない。
+既定の設定（configs/eval/dev_fast.yaml）では configs/splits/test.json は使わない。
+``--config configs/eval/test_fast.yaml`` は test_window の音源で data/processed/test_fast/ に作る
+（第10段階、2026-10-02 の人間の指示）。data/ 以下の既存のファイルは読むだけで変更しない。
 
 実行（リポジトリ直下から）:
     uv run python scripts/build_dev_fast.py > runs/dev_fast_build/build.log 2>&1
@@ -39,7 +41,6 @@ sys.path.insert(0, str(ROOT / "src"))
 import numpy as np  # noqa: E402
 import yaml  # noqa: E402
 
-from spkrate.data.splits import load_split  # noqa: E402
 from spkrate.eval.dev_window import (  # noqa: E402
     DevWindowAudio,
     load_alignments,
@@ -47,6 +48,7 @@ from spkrate.eval.dev_window import (  # noqa: E402
     load_dev_window,
     load_window_config,
 )
+from spkrate.eval.split_profile import load_split_ids  # noqa: E402
 from spkrate.eval.fast_speech import (  # noqa: E402
     RATE_BIN_KEYS,
     build_fast_windows,
@@ -92,7 +94,9 @@ def prepare(cfg: dict):
     wcfg = load_window_config(_resolve(cfg["dev_window_config"]))
     ws = load_dev_window(_resolve(wcfg.output_dir))
     alignments = load_alignments(_resolve(wcfg.alignments))
-    _, clip_paths = load_dev_clips(_resolve(wcfg.clips_jsonl), load_split(_resolve(wcfg.dev_split)))
+    _, clip_paths = load_dev_clips(
+        _resolve(wcfg.clips_jsonl), load_split_ids(_resolve(wcfg.dev_split), allow_test=wcfg.allow_test_split)
+    )
     paths = {k: _resolve(Path(wcfg.audio_root) / v) for k, v in clip_paths.items()}
     numbers = select_sources(ws, seed=int(cfg["seed"]), num_sources=int(cfg["num_sources"]),
                              max_speed=max(float(s) for s in cfg["speeds"]),
