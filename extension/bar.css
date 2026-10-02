@@ -1,0 +1,77 @@
+/* 小窓（Document Picture-in-Picture）と管理ページで共通の配色・バー */
+:root {
+  --ink: #141a2b;
+  --track: #232b44;
+  --tick: #4a5578;
+  --pace: #8fb8ff;
+  --text: #e8ecf7;
+  --sub: #9aa4c4;
+  --warn: #ffc857;
+  --over: #ff6b6b;
+  --avg: #c4b5fd;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--ink);
+  color: var(--text);
+  font-family: ui-rounded, "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+}
+
+/* ---- 小窓 ---- */
+.pip {
+  height: 100vh;
+  padding: 10px 14px 12px;
+  display: grid; align-content: center; gap: 7px;
+  user-select: none;
+}
+.pip-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.paces { display: flex; align-items: baseline; gap: 12px; }
+.pace-unit { font-size: 12px; color: var(--sub); }
+.pace-value.avg { color: var(--avg); }
+.pace-value { font-size: 26px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.timer { display: flex; align-items: center; gap: 4px; }
+.timer-text { font-size: 26px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; min-width: 4.2ch; text-align: right; margin-right: 4px; }
+.timer-text.warn { color: var(--warn); }
+.timer-text.over { color: var(--over); }
+.timer.paused .timer-text { opacity: 0.6; }
+.timer button {
+  font: inherit; font-size: 14px; width: 28px; height: 28px; padding: 0; cursor: pointer;
+  color: var(--text); background: var(--track); border: 0; border-radius: 4px;
+}
+.timer button:hover { background: var(--tick); }
+.timer button:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+
+/* 話速バー: 0〜12 モーラ/秒。目盛りは 4・8・12 */
+.pace-bar { position: relative; height: 16px; background: var(--track); border-radius: 3px; overflow: hidden; }
+.pace-fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--pace); transition: width 180ms ease-out; }
+.pace-bar i { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--tick); }
+.pace-bar.avg .pace-fill { background: var(--avg); }
+.pace-bar i:nth-of-type(1) { left: 33.333%; }
+.pace-bar i:nth-of-type(2) { left: 66.666%; }
+
+/* 残り時間バー: 時間とともに右から減る */
+.time-bar { height: 5px; background: var(--track); border-radius: 3px; overflow: hidden; }
+.time-fill { height: 100%; width: 100%; background: var(--sub); }
+.time-fill.warn { background: var(--warn); }
+.time-fill.over { background: var(--over); }
+
+@media (prefers-reduced-motion: reduce) { .pace-fill { transition: none; } }
+
+[hidden] { display: none !important; }
+
+/* 設定パネル（小窓の中で本体と入れ替わる） */
+.settings { gap: 8px; }
+.settings label { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--sub); }
+.settings input, .settings select {
+  font: inherit; font-size: 14px; width: 11em; padding: 4px 8px; color: var(--text);
+  background: var(--track); border: 1px solid var(--tick); border-radius: 4px;
+}
+.settings input:focus-visible, .settings select:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+.settings .row { display: flex; align-items: center; gap: 10px; }
+.settings .row label { flex: 1; }
+.settings .row button {
+  font: inherit; width: 40px; height: 28px; padding: 0; cursor: pointer;
+  color: var(--ink); background: var(--pace); border: 0; border-radius: 4px;
+}
+.settings .row button:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
