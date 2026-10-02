@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "SpeedMeter",
+  "version": "0.1.0",
+  "action": { "default_title": "SpeedMeter" },
+  "background": { "service_worker": "background.js" },
+  "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}
