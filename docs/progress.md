@@ -492,3 +492,8 @@
 - docs/experiments/015: 基準をすべて満たす条件は無く、最終モデルの候補は exp016（x2 の天井が最良、超過の割合の和が最小）。基準構成は exp005 のまま、web/ に加えるものは無い。
 - 第10段階: test 用の準備と評価を --split test で動かす仕組みを作り（exp/026-test-eval）、ubuntu-desktop で exp016 → exp005 のテスト評価を 08:40 に始めた（準備は約3〜3.5時間の見込み）。
 
+### 2026-10-02 統括: 第10段階（テストセットでの評価と総括）の完了（停止）
+- exp016（候補）と exp005 を ubuntu-desktop（cuda）でテストセットで評価した（準備: 特徴量・アライメント・窓・test_fast・無発話指標。window_diagnostics が load_split で失敗し、修正して続きから再開）。metrics.csv に78行追記（c8cf50b）。
+- test の窓 clean MAE は exp005 0.4599・exp016 0.4786、x2 の天井は 11.922・13.416。dev と同じ向きで、2節の基準の満否も dev と同じ。推論時間は MPS が使えず未測定。ベースラインの test 評価・JVS は未実施。
+- results/final_eval.md と docs/experiments/006-summary.md（発表用の表 A〜C）を書いた。基準構成は exp005 のまま（候補 exp016、人間の承認待ち）。指示により停止。
+
