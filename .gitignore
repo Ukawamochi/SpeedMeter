@@ -34,3 +34,7 @@ runs/
 
 # Claude Code の設定ディレクトリ
 .claude/
+
+# Chrome 拡張機能（extension/）が読む、実行時に置くファイル。scripts/build_extension.py が作る
+/extension/models/
+/extension/vendor/
